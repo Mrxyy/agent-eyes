@@ -57,6 +57,14 @@ interface TreeNode extends SourceInfo {
   depth: number;
 }
 
+interface BreadcrumbNode extends SourceInfo {
+  element: HTMLElement;
+}
+
+type BreadcrumbDisplayPart =
+  | { kind: 'item'; index: number; node: BreadcrumbNode }
+  | { kind: 'ellipsis'; key: string };
+
 interface ActiveNode {
   top?: string;
   bottom?: string;
@@ -169,6 +177,33 @@ export class CodeInspectorComponent extends LitElement {
   internalCopy: boolean = false; // 内部 copy 状态
   @state()
   internalTarget = false; // 内部 target 状态
+  @state()
+  chatOpen = false; // 点击后固定对话
+  @state()
+  overlayMode: 'full' | 'outline' = 'full';
+  private forceOutlineNextCover = false;
+  @state()
+  breadcrumb: BreadcrumbNode[] = [];
+  @state()
+  breadcrumbIndex = 0;
+  @state()
+  requirement = '';
+  @state()
+  agentOutput = '';
+  @state()
+  agentLoading = false;
+  @state()
+  agentError = '';
+  @state()
+  agentReasoning = '';
+  @state()
+  agentActions = '';
+  @state()
+  agentTrace = '';
+
+  private agentTraceType: 'text' | 'reasoning' | '' = '';
+
+  private agentAbortController: AbortController | null = null;
 
   @query('#inspector-switch')
   inspectorSwitchRef!: HTMLDivElement;
@@ -177,6 +212,8 @@ export class CodeInspectorComponent extends LitElement {
   codeInspectorContainerRef!: HTMLDivElement;
   @query('#element-info')
   elementInfoRef!: HTMLDivElement;
+  @query('#ci-agent-input')
+  agentInputRef?: HTMLTextAreaElement;
   @query('#inspector-node-tree')
   nodeTreeRef!: HTMLDivElement;
 
@@ -385,6 +422,16 @@ export class CodeInspectorComponent extends LitElement {
     this.targetNode = target;
     // 设置 target 的位置
     const { top, right, bottom, left } = target.getBoundingClientRect();
+    const browserHeight = document.documentElement.clientHeight;
+    const browserWidth = document.documentElement.clientWidth;
+    const area = Math.max(0, right - left) * Math.max(0, bottom - top);
+    const viewportArea = browserWidth * browserHeight;
+    if (this.forceOutlineNextCover) {
+      this.overlayMode = 'outline';
+      this.forceOutlineNextCover = false;
+    } else {
+      this.overlayMode = area > viewportArea * 0.45 ? 'outline' : 'full';
+    }
     this.position = {
       top,
       right,
@@ -438,6 +485,340 @@ export class CodeInspectorComponent extends LitElement {
     }
   };
 
+  private parseSourceInfoFromPath = (paths: string): SourceInfo | null => {
+    if (!paths) return null;
+    const segments = paths.split(':');
+    if (segments.length < 4) return null;
+    const name = segments[segments.length - 1];
+    const column = Number(segments[segments.length - 2]);
+    const line = Number(segments[segments.length - 3]);
+    const path = segments.slice(0, segments.length - 3).join(':');
+    if (!path || !name || Number.isNaN(line) || Number.isNaN(column)) {
+      return null;
+    }
+    return { name, path, line, column };
+  };
+
+  private buildDomBreadcrumb = (
+    nodePath: EventTarget[],
+    stopDom?: HTMLElement | null
+  ): BreadcrumbNode[] => {
+    const nodes = nodePath.filter(
+      (n): n is HTMLElement => n instanceof HTMLElement
+    );
+    const validNodeList = this.getValidNodeList(nodes);
+    const items: BreadcrumbNode[] = [];
+    // root -> target
+    for (const { node } of validNodeList.reverse()) {
+      const info = this.getSourceInfo(node);
+      if (!info) continue;
+      items.push({ ...info, element: node });
+      if (stopDom && node === stopDom) break;
+    }
+    return items;
+  };
+
+  private getComponentFiberInfo = (dom: HTMLElement) => {
+    let fiber = this.getReactFiberFromDom(dom);
+    if (!fiber) {
+      let parent: HTMLElement | null = dom.parentElement;
+      let guard = 0;
+      while (parent && guard++ < 50) {
+        fiber = this.getReactFiberFromDom(parent);
+        if (fiber) break;
+        parent = parent.parentElement;
+      }
+    }
+    if (!fiber) return null;
+
+    const getFiberName = (f: any) => {
+      const t = f?.elementType ?? f?.type;
+      if (!t) return '';
+      if (typeof t === 'string') return '';
+      if (typeof t === 'function') {
+        return t.displayName || t.name || '';
+      }
+      if (typeof t === 'object') {
+        return (
+          t.displayName ||
+          t.name ||
+          t.render?.displayName ||
+          t.render?.name ||
+          t.type?.displayName ||
+          t.type?.name ||
+          ''
+        );
+      }
+      return '';
+    };
+
+    let current: any = fiber;
+    let guard = 0;
+    let fiberRootDom = null; 
+    fiberRootDom = current
+    while (current && guard++ < 200) {
+      const name = getFiberName(current);
+      console.log(current,name,"getFiberName")
+      if (name) {
+        const propsPath =
+          current.memoizedProps?.[PathName] ??
+          current.pendingProps?.[PathName];
+        const sourceInfo =
+          typeof propsPath === 'string'
+            ? this.parseSourceInfoFromPath(propsPath)
+            : null;
+        const componentDom = fiberRootDom;
+        return { name, sourceInfo, componentDom };
+      }
+      fiberRootDom =  this.getNearestDomFromFiber(current)
+      current = current.return;
+    }
+    return null;
+  };
+
+  private findComponentFromDomPath = (nodePath: EventTarget[]) => {
+    const nodes = nodePath.filter(
+      (n): n is HTMLElement => n instanceof HTMLElement
+    );
+    const isComponent = (name: string) => /^[A-Z]/.test(name);
+    for (const node of nodes) {
+      const info = this.getSourceInfo(node);
+      if (info && isComponent(info.name)) {
+        return { info, element: node };
+      }
+    }
+    return null;
+  };
+
+  private buildDomCodeBreadcrumb = (
+    nodePath: EventTarget[]
+  ): BreadcrumbNode[] => {
+    const component = this.findComponentFromDomPath(nodePath);
+    if (!component) return [];
+
+    const items: BreadcrumbNode[] = [];
+    items.push({
+      ...component.info,
+      element: component.element,
+    });
+
+    const pathNodes: HTMLElement[] = [];
+    const target = (nodePath.find((n) => n instanceof HTMLElement) ||
+      component.element) as HTMLElement;
+    let cursor: HTMLElement | null = target;
+    let guard = 0;
+    while (cursor && guard++ < 200) {
+      pathNodes.unshift(cursor);
+      if (cursor === component.element) break;
+      cursor = cursor.parentElement as HTMLElement | null;
+    }
+
+    for (const node of pathNodes) {
+      const nodeInfo = this.getSourceInfo(node);
+      if (!nodeInfo) continue;
+      items.push({ ...nodeInfo, element: node });
+    }
+
+    return items;
+  };
+
+  private getReactFiberFromDom = (dom: HTMLElement): any => {
+    try {
+      const anyDom = dom as any;
+      for (const key in anyDom) {
+        if (key.startsWith('__reactFiber$')) {
+          return anyDom[key];
+        }
+      }
+      for (const key in anyDom) {
+        if (key.startsWith('__reactInternalInstance$')) {
+          return anyDom[key];
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  };
+
+  private getNearestDomFromFiber = (fiber: any): HTMLElement | null => {
+    let current = fiber;
+    let guard = 0;
+    while (current && guard++ < 80) {
+      if (current.stateNode instanceof HTMLElement) {
+        return current.stateNode;
+      }
+      current = current.child;
+    }
+    return null;
+  };
+
+  private buildReactBreadcrumb = (dom: HTMLElement): BreadcrumbNode[] => {
+    const info = this.getComponentFiberInfo(dom);
+    if (!info) return [];
+    const componentDom = info.componentDom || dom;
+
+    console.log(info,componentDom,"componentDom")
+
+    const fallbackNodeInfo =
+      this.getSourceInfo(dom) ||
+      (this.targetNode ? this.getSourceInfo(this.targetNode) : null);
+    const componentNodeInfo = info.sourceInfo || fallbackNodeInfo;
+    if (!componentNodeInfo) return [];
+
+    const items: BreadcrumbNode[] = [];
+    items.push({
+      ...componentNodeInfo,
+      name: info.name,
+      element: componentDom,
+    });
+
+    const pathNodes: HTMLElement[] = [];
+    let current: HTMLElement | null = dom;
+    let guard = 0;
+    while (current && guard++ < 200) {
+      pathNodes.unshift(current);
+      if (current === componentDom) break;
+      current = current.parentElement as HTMLElement | null;
+    }
+
+    for (const node of pathNodes) {
+      const nodeInfo = this.getSourceInfo(node);
+      if (!nodeInfo) continue;
+      items.push({ ...nodeInfo, element: node });
+    }
+
+    return items;
+  };
+
+  private trimBreadcrumbByPath = (
+    items: BreadcrumbNode[],
+    path?: string
+  ): BreadcrumbNode[] => {
+    if (!path || items.length === 0) return items;
+    let end = items.length - 1;
+    let start = end;
+    while (start >= 0 && items[start].path === path) {
+      start--;
+    }
+    const sliced = items.slice(start + 1, end + 1);
+    return sliced.length > 0 ? sliced : items;
+  };
+
+  private buildBreadcrumb = (
+    nodePath: EventTarget[],
+    dom?: HTMLElement | null,
+    componentInfo?: { componentDom?: HTMLElement | null }
+  ): BreadcrumbNode[] => {
+    const reactItems = dom ? this.buildReactBreadcrumb(dom) : [];
+    if (reactItems.length > 0) return reactItems;
+
+    const stopDom = componentInfo?.componentDom || null;
+    const domCodeItems = this.buildDomCodeBreadcrumb(nodePath);
+    if (domCodeItems.length > 0) return domCodeItems;
+    const domItems = this.buildDomBreadcrumb(nodePath, stopDom);
+    return this.trimBreadcrumbByPath(domItems, this.element?.path);
+  };
+
+  private getBreadcrumbDisplayParts = (): BreadcrumbDisplayPart[] => {
+    const items = this.breadcrumb;
+    const n = items.length;
+    if (n === 0) return [];
+    if (n <= 6) {
+      return items.map((node, index) => ({ kind: 'item', index, node }));
+    }
+
+    const current = Math.min(Math.max(this.breadcrumbIndex, 0), n - 1);
+    const last = n - 1;
+
+    let start = Math.max(1, current - 1);
+    let end = Math.min(last - 1, current + 1);
+
+    if (current <= 1) {
+      start = 1;
+      end = Math.min(last - 1, 3);
+    }
+    if (current >= last - 1) {
+      end = last - 1;
+      start = Math.max(1, last - 3);
+    }
+
+    const parts: BreadcrumbDisplayPart[] = [
+      { kind: 'item', index: 0, node: items[0] },
+    ];
+
+    if (start > 1) {
+      parts.push({ kind: 'ellipsis', key: 'left' });
+    }
+    for (let i = start; i <= end; i++) {
+      parts.push({ kind: 'item', index: i, node: items[i] });
+    }
+    if (end < last - 1) {
+      parts.push({ kind: 'ellipsis', key: 'right' });
+    }
+
+    parts.push({ kind: 'item', index: last, node: items[last] });
+    return parts;
+  };
+
+  private scrollActiveBreadcrumbIntoView = () => {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const active = root.querySelector<HTMLElement>(
+      `.ci-crumb[data-index="${this.breadcrumbIndex}"]`
+    );
+    active?.scrollIntoView({ block: 'nearest', inline: 'center' });
+  };
+
+  private openChat = async (nodePath: EventTarget[], dom?: HTMLElement) => {
+    this.chatOpen = true;
+    this.requirement = '';
+    this.agentOutput = '';
+    this.agentError = '';
+    const targetDom = dom || this.targetNode ;
+    const componentInfo = targetDom
+      ? this.getComponentFiberInfo(targetDom)
+      : null;
+    if (componentInfo?.componentDom) {
+      this.targetNode = targetDom;
+    }
+    this.breadcrumb = this.buildBreadcrumb(
+      nodePath,
+      targetDom || undefined,
+      componentInfo || undefined
+    );
+    this.breadcrumbIndex = Math.max(0, this.breadcrumb.length - 1);
+    await this.updateComplete;
+    if (componentInfo?.componentDom && targetDom) {
+      await this.renderCover(targetDom);
+    } else if (this.targetNode) {
+      const { vertical, horizon, additionStyle } =
+        await this.calculateElementInfoPosition(this.targetNode);
+      this.elementTipStyle = {
+        vertical,
+        horizon,
+        visibility: 'visible',
+        additionStyle,
+      };
+    }
+    this.scrollActiveBreadcrumbIntoView();
+    this.agentInputRef?.focus?.();
+  };
+
+  private closeChat = () => {
+    this.chatOpen = false;
+    this.requirement = '';
+    this.agentOutput = '';
+    this.agentError = '';
+    this.breadcrumb = [];
+    this.breadcrumbIndex = 0;
+    if (this.agentAbortController) {
+      this.agentAbortController.abort();
+      this.agentAbortController = null;
+    }
+    this.agentLoading = false;
+  };
+
   getAstroFilePath = (target: HTMLElement): string => {
     if (target.getAttribute?.(AstroFile)) {
       return `${target.getAttribute(AstroFile)}:${target.getAttribute(
@@ -466,7 +847,7 @@ export class CodeInspectorComponent extends LitElement {
   };
 
   removeCover = (force?: boolean | MouseEvent) => {
-    if (force !== true && this.nodeTree) {
+    if (force !== true && (this.nodeTree || this.chatOpen)) {
       return;
     }
     this.targetNode = null;
@@ -735,6 +1116,9 @@ export class CodeInspectorComponent extends LitElement {
 
   // 鼠标移动渲染遮罩层位置
   handleMouseMove = async (e: MouseEvent | TouchEvent) => {
+    if (this.chatOpen) {
+      return;
+    }
     if (
       ((this.isTracking(e) && !this.dragging) || this.open) &&
       !this.hoverSwitch
@@ -802,6 +1186,19 @@ export class CodeInspectorComponent extends LitElement {
 
   // 鼠标点击唤醒遮罩层
   handleMouseClick = (e: MouseEvent | TouchEvent) => {
+    const composedPath = e.composedPath() as EventTarget[];
+    const clickedInInfo = composedPath.includes(this.elementInfoRef);
+    const clickedInNodeTree = composedPath.includes(this.nodeTreeRef);
+    const clickedInSwitch = composedPath.includes(this.inspectorSwitchRef);
+
+    if (this.chatOpen) {
+      if (!clickedInInfo && !clickedInNodeTree && !clickedInSwitch) {
+        this.closeChat();
+        this.removeCover(true);
+      }
+      return;
+    }
+
     if (this.isTracking(e) || this.open) {
       if (this.show) {
         // 阻止冒泡
@@ -810,14 +1207,16 @@ export class CodeInspectorComponent extends LitElement {
         e.preventDefault();
         // 触发功能
         this.trackCode();
-        // 清除遮罩层
-        this.removeCover();
+        void this.openChat(
+          composedPath,
+          (this.targetNode || (e.target as HTMLElement)) ?? undefined
+        );
         if (this.autoToggle) {
           this.open = false;
         }
       }
     }
-    if (!e.composedPath().includes(this.nodeTreeRef)) {
+    if (!clickedInNodeTree) {
       this.removeLayerPanel();
     }
   };
@@ -896,9 +1295,260 @@ export class CodeInspectorComponent extends LitElement {
 
   // 监听键盘抬起，清除遮罩层
   handleKeyUp = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && this.chatOpen) {
+      this.closeChat();
+      this.removeCover(true);
+      return;
+    }
     if (!this.isTracking(e) && !this.open) {
       this.removeCover();
     }
+  };
+
+  private jumpBreadcrumb = async (index: number) => {
+    if (index < 0 || index >= this.breadcrumb.length) return;
+    this.breadcrumbIndex = index;
+    const node = this.breadcrumb[index];
+    this.forceOutlineNextCover = true;
+    console.log(node,"none")
+    await this.renderCover(node.element);
+    this.scrollActiveBreadcrumbIntoView();
+  };
+
+  private gotoParentBreadcrumb = () => {
+    if (this.breadcrumbIndex <= 0) return;
+    void this.jumpBreadcrumb(this.breadcrumbIndex - 1);
+  };
+
+  private gotoChildBreadcrumb = () => {
+    if (this.breadcrumbIndex >= this.breadcrumb.length - 1) return;
+    void this.jumpBreadcrumb(this.breadcrumbIndex + 1);
+  };
+
+  private cancelAgent = () => {
+    if (this.agentAbortController) {
+      this.agentAbortController.abort();
+      this.agentAbortController = null;
+    }
+    this.agentLoading = false;
+  };
+
+  private buildClientContextPrompt = () => {
+    const dom = this.targetNode;
+    const tagName = dom?.tagName?.toLowerCase?.() || '';
+    const firstClass = dom?.classList?.[0] || '';
+    const className = (dom as any)?.className || '';
+    const textContent = (dom?.textContent || '').trim().replace(/\s+/g, ' ');
+    const text = textContent.length > 200 ? `${textContent.slice(0, 200)}…` : textContent;
+
+    const domPath = this.breadcrumb.map((b) => ({
+      name: b.name,
+      label: b.name,
+      path: b.path,
+      line: b.line,
+      column: b.column,
+    }));
+    const domPathLabels = domPath.map((n) => n.label).join(' > ');
+    const elementLoc = `${this.element.path}:${this.element.line}:${this.element.column}`;
+    const domLabel = [tagName, firstClass].filter(Boolean).join('.');
+
+    const contextPrompt =
+      `当前选中的元素对应的 DOM 元素为: ${domLabel}，className为: ${className}，纯文字内容为: ${text}。` +
+      `\n在代码中的定位为 ${elementLoc}，对应的 JSX/TSX 标签为 <${this.element.name} ...>。` +
+      `\n从根节点到选中节点的路径为: ${domPathLabels}。`;
+
+    return {
+      contextPrompt,
+      dom: {
+        tagName,
+        firstClass,
+        className,
+        textContent: textContent.slice(0, 2000),
+      },
+      domPath,
+    };
+  };
+
+  private submitAgent = async () => {
+    const requirement = this.requirement.trim();
+    if (!requirement || this.agentLoading) return;
+
+    this.agentLoading = true;
+    this.agentError = '';
+    this.agentOutput = '';
+    this.agentReasoning = '';
+    this.agentActions = '';
+    this.agentTrace = '';
+    this.agentTraceType = '';
+
+    const controller = new AbortController();
+    this.agentAbortController = controller;
+
+    const { contextPrompt, dom, domPath } = this.buildClientContextPrompt();
+    const payload = {
+      requirement,
+      contextPrompt,
+      file: this.element.path,
+      line: this.element.line,
+      column: this.element.column,
+      elementName: this.element.name,
+      dom,
+      domPath,
+    };
+
+    try {
+      await this.streamAgentWithXhr(payload, controller);
+    } catch (e: any) {
+      if (String(e?.name) === 'AbortError') {
+        this.agentError = '已取消';
+      } else {
+        this.agentError = String(e?.message || e);
+      }
+    } finally {
+      if (this.agentAbortController === controller) {
+        this.agentAbortController = null;
+      }
+      this.agentLoading = false;
+    }
+  };
+
+  private streamAgentWithXhr = (
+    payload: Record<string, any>,
+    controller: AbortController
+  ) => {
+    return new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      let lastLength = 0;
+      let buffer = '';
+      let isSse: boolean | null = null;
+      xhr.open('POST', `http://${this.ip}:${this.port}/agent`, true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('Accept', 'text/event-stream');
+      xhr.responseType = 'text';
+
+      const abortHandler = () => {
+        try {
+          xhr.abort();
+        } catch {
+          // ignore
+        }
+      };
+      controller.signal.addEventListener('abort', abortHandler);
+
+      const processSseText = (text: string) => {
+        buffer += text;
+        let index = buffer.indexOf('\n\n');
+        while (index !== -1) {
+          const raw = buffer.slice(0, index);
+          buffer = buffer.slice(index + 2);
+          const lines = raw.split(/\n/);
+          const dataLines: string[] = [];
+          for (const line of lines) {
+            if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).trimStart());
+            }
+          }
+          if (dataLines.length) {
+            const data = dataLines.join('\n');
+            if (data === '[DONE]') {
+              break;
+            }
+            try {
+              const parsed = JSON.parse(data);
+              const type = parsed?.type;
+              if (!type && parsed?.delta) {
+                this.agentOutput += String(parsed.delta);
+                continue;
+              }
+              if (type === 'text-delta') {
+                this.agentOutput += String(parsed.delta || '');
+                if (this.agentTraceType !== 'text') {
+                  this.agentTrace += '\n[assistant]\n';
+                  this.agentTraceType = 'text';
+                }
+                this.agentTrace += String(parsed.delta || '');
+              } else if (type === 'reasoning-delta') {
+                this.agentReasoning += String(parsed.delta || '');
+                if (this.agentTraceType !== 'reasoning') {
+                  this.agentTrace += '\n[reasoning]\n';
+                  this.agentTraceType = 'reasoning';
+                }
+                this.agentTrace += String(parsed.delta || '');
+              } else if (type === 'tool-call') {
+                const name = parsed.toolName || 'tool';
+                const args = parsed.args ? JSON.stringify(parsed.args) : '';
+                this.agentActions += `\n> 调用 ${name} ${args}\n`;
+                this.agentTraceType = '';
+                this.agentTrace += `\n[tool-call] ${name} ${args}\n`;
+              } else if (type === 'tool-result') {
+                const name = parsed.toolName || 'tool';
+                const result = parsed.result
+                  ? JSON.stringify(parsed.result)
+                  : '';
+                this.agentActions += `> 结果 ${name} ${result}\n`;
+                this.agentTraceType = '';
+                this.agentTrace += `\n[tool-result] ${name} ${result}\n`;
+              } else if (type === 'error') {
+                this.agentError = String(parsed.message || 'error');
+                this.agentTraceType = '';
+                this.agentTrace += `\n[error] ${String(parsed.message || '')}\n`;
+              }
+            } catch {
+              this.agentOutput += data;
+            }
+          }
+          index = buffer.indexOf('\n\n');
+        }
+      };
+
+      const handleProgress = () => {
+        const text = xhr.responseText || '';
+        if (text.length < lastLength) return;
+        const delta = text.slice(lastLength);
+        lastLength = text.length;
+        if (isSse === null) {
+          const ct = xhr.getResponseHeader('Content-Type') || '';
+          isSse =
+            ct.includes('text/event-stream') ||
+            delta.startsWith('data:') ||
+            delta.startsWith(':') ||
+            delta.includes('\ndata:');
+        }
+        if (isSse) {
+          processSseText(delta);
+        } else {
+          this.agentOutput = text;
+        }
+      };
+
+      xhr.onprogress = handleProgress;
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState === 3) {
+          handleProgress();
+        }
+      };
+      xhr.onerror = () => {
+        controller.signal.removeEventListener('abort', abortHandler);
+        reject(new Error('Network error'));
+      };
+      xhr.onload = () => {
+        controller.signal.removeEventListener('abort', abortHandler);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          this.agentOutput = xhr.responseText || this.agentOutput;
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `Request failed: ${xhr.status} ${xhr.statusText}${
+                xhr.responseText ? `\n${xhr.responseText}` : ''
+              }`
+            )
+          );
+        }
+      };
+
+      xhr.send(JSON.stringify(payload));
+    });
   };
 
   // 打印功能提示信息
@@ -1192,7 +1842,9 @@ export class CodeInspectorComponent extends LitElement {
 
     return html`
       <div
-        class="code-inspector-container"
+        class="code-inspector-container ${this.overlayMode === 'outline'
+          ? 'overlay-outline'
+          : ''}"
         id="code-inspector-container"
         style=${styleMap(containerPosition)}
       >
@@ -1208,20 +1860,229 @@ export class CodeInspectorComponent extends LitElement {
           class="element-info ${this.elementTipStyle.vertical} ${this
             .elementTipStyle.horizon} ${this.elementTipStyle.visibility}"
           style=${styleMap({
-            width: PopperWidth + 'px',
+            width: (this.chatOpen ? 520 : PopperWidth) + 'px',
             maxWidth: '100vw',
             ...this.elementTipStyle.additionStyle,
           })}
         >
-          <div class="element-info-content">
-            <div class="name-line">
-              <div class="element-name">
-                <span class="element-title">&lt;${this.element.name}&gt;</span>
-              </div>
-            </div>
-            <div class="path-line">
-              ${this.element.path}:${this.element.line}:${this.element.column}
-            </div>
+          <div
+            class="element-info-content ${this.chatOpen ? 'ci-panel' : 'ci-tip'}"
+          >
+            ${this.chatOpen
+              ? html`
+                  <div class="ci-breadcrumb-row">
+                    <div class="ci-breadcrumb-scroll">
+                      ${this.getBreadcrumbDisplayParts().map((part, i, arr) =>
+                        part.kind === 'ellipsis'
+                          ? html`
+                              <span class="ci-ellipsis" title="已省略">…</span>
+                              ${i < arr.length - 1
+                                ? html`<span class="ci-sep">›</span>`
+                                : ''}
+                            `
+                          : html`
+                              <span
+                                class="ci-crumb ${part.index ===
+                                this.breadcrumbIndex
+                                  ? 'active'
+                                  : ''}"
+                                data-index="${part.index}"
+                                title="${part.node.path}:${part.node.line}:${part.node.column}"
+                                @click="${() => this.jumpBreadcrumb(part.index)}"
+                                >${part.node.name}</span
+                              >
+                              ${i < arr.length - 1
+                                ? html`<span class="ci-sep">›</span>`
+                                : ''}
+                            `
+                      )}
+                    </div>
+                    <div class="ci-breadcrumb-controls">
+                      <span
+                        class="ci-arrow ${this.breadcrumbIndex <= 0
+                          ? 'disabled'
+                          : ''}"
+                        title="上一级"
+                        @click="${this.gotoParentBreadcrumb}"
+                        >${html`<svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path
+                            d="M8 15l4-4 4 4"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          />
+                        </svg>`}</span
+                      >
+                      <span
+                        class="ci-arrow ${this.breadcrumbIndex >=
+                        this.breadcrumb.length - 1
+                          ? 'disabled'
+                          : ''}"
+                        title="下一级"
+                        @click="${this.gotoChildBreadcrumb}"
+                        >${html`<svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path
+                            d="M8 9l4 4 4-4"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          />
+                        </svg>`}</span
+                      >
+                    </div>
+                  </div>
+                  <div class="ci-agent">
+                    <textarea
+                      id="ci-agent-input"
+                      class="ci-agent-input"
+                      placeholder="描述你的修改需求，按 Ctrl/⌘ + Enter 发送"
+                      .value="${this.requirement}"
+                      @input="${(e: Event) => {
+                        this.requirement = (
+                          e.target as HTMLTextAreaElement
+                        ).value;
+                      }}"
+                      @keydown="${(e: KeyboardEvent) => {
+                        const isSubmit =
+                          (e.ctrlKey || e.metaKey) && e.key === 'Enter';
+                        if (isSubmit) {
+                          e.preventDefault();
+                          void this.submitAgent();
+                        }
+                      }}"
+                    ></textarea>
+                    <div class="ci-agent-footer">
+                      <div
+                        class="ci-agent-status ${this.agentError
+                          ? 'error'
+                          : ''}"
+                      >
+                        ${this.agentLoading
+                          ? '生成中…'
+                          : this.agentError || ''}
+                      </div>
+                      <div class="ci-agent-actions">
+                        ${this.agentLoading
+                          ? html`
+                              <span
+                                class="ci-action"
+                                title="取消"
+                                @click="${this.cancelAgent}"
+                                >${html`<svg
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  xmlns="http://www.w3.org/2000/svg"
+                                >
+                                  <path
+                                    d="M6 6l12 12M18 6L6 18"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                  />
+                                </svg>`}</span
+                              >
+                            `
+                          : html`
+                              <span
+                                class="ci-action ${this.requirement.trim()
+                                  ? ''
+                                  : 'disabled'}"
+                                title="发送"
+                                @click="${() => void this.submitAgent()}"
+                                >${html`<svg
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  xmlns="http://www.w3.org/2000/svg"
+                                >
+                                  <path
+                                    d="M22 2L11 13"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                  />
+                                  <path
+                                    d="M22 2L15 22l-4-9-9-4 20-7z"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                  />
+                                </svg>`}</span
+                              >
+                            `}
+                        <span
+                          class="ci-action"
+                          title="关闭"
+                          @click="${() => {
+                            this.closeChat();
+                            this.removeCover(true);
+                          }}"
+                          >${html`<svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                          >
+                            <path
+                              d="M18 6 6 18"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                            <path
+                              d="m6 6 12 12"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          </svg>`}</span
+                        >
+                      </div>
+                    </div>
+                    ${this.agentTrace
+                      ? html`<pre class="ci-agent-output ci-agent-trace">
+                          ${this.agentTrace}
+                        </pre>`
+                      : ''}
+                    ${this.agentReasoning
+                      ? html`<pre class="ci-agent-output ci-agent-reasoning">
+                          ${this.agentReasoning}
+                        </pre>`
+                      : ''}
+                    ${this.agentActions
+                      ? html`<pre class="ci-agent-output ci-agent-actions">
+                          ${this.agentActions}
+                        </pre>`
+                      : ''}
+                    ${this.agentOutput
+                      ? html`<pre class="ci-agent-output">${this.agentOutput}</pre>`
+                      : ''}
+                  </div>
+                `
+              : html`<span class="ci-tip-tag">${this.element.name}</span>`}
           </div>
         </div>
       </div>
@@ -1453,6 +2314,11 @@ export class CodeInspectorComponent extends LitElement {
         }
       }
     }
+    .code-inspector-container.overlay-outline {
+      .content-overlay {
+        background: transparent;
+      }
+    }
     .element-info {
       position: absolute;
     }
@@ -1469,6 +2335,199 @@ export class CodeInspectorComponent extends LitElement {
       box-sizing: border-box;
       padding: 4px 8px;
       border-radius: 4px;
+      pointer-events: auto;
+    }
+    .ci-tip {
+      padding: 6px 10px;
+      border-radius: 10px;
+    }
+    .ci-tip-tag {
+      color: #1d2129;
+      font-weight: 600;
+    }
+    .ci-panel {
+      padding: 10px 12px;
+      border-radius: 12px;
+    }
+    .ci-panel,
+    .ci-panel * {
+      pointer-events: auto;
+    }
+    .ci-breadcrumb-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #f2f3f5;
+    }
+    .ci-breadcrumb-scroll {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+    }
+    .ci-crumb {
+      display: inline-flex;
+      align-items: center;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding: 2px 6px;
+      border-radius: 8px;
+      cursor: pointer;
+      user-select: none;
+      background: rgba(0, 0, 0, 0.03);
+      color: #4e5969;
+      border: 1px solid transparent;
+      flex: 0 1 auto;
+    }
+    .ci-crumb:hover {
+      background: rgba(0, 0, 0, 0.06);
+      color: #1d2129;
+    }
+    .ci-crumb.active {
+      background: rgba(0, 106, 255, 0.12);
+      border-color: rgba(0, 106, 255, 0.25);
+      color: #006aff;
+    }
+    .ci-sep {
+      display: inline-flex;
+      align-items: center;
+      margin: 0 2px;
+      color: #c9cdd4;
+      user-select: none;
+      flex: 0 0 auto;
+    }
+    .ci-ellipsis {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.04);
+      color: #86909c;
+      user-select: none;
+      flex: 0 0 auto;
+    }
+    .ci-breadcrumb-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .ci-arrow {
+      width: 16px;
+      height: 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #4e5969;
+      cursor: pointer;
+      border-radius: 6px;
+      user-select: none;
+    }
+    .ci-arrow:hover {
+      background: rgba(0, 0, 0, 0.06);
+      color: #1d2129;
+    }
+    .ci-arrow.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+    .ci-agent {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .ci-agent-input {
+      width: 100%;
+      min-height: 78px;
+      max-height: 40vh;
+      resize: vertical;
+      border: 1px solid #e5e6eb;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      outline: none;
+      box-sizing: border-box;
+      font-family: inherit;
+      background: #fff;
+    }
+    .ci-agent-input:focus {
+      border-color: #006aff;
+      box-shadow: 0 0 0 2px rgba(0, 106, 255, 0.15);
+    }
+    .ci-agent-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .ci-agent-status {
+      font-size: 11px;
+      color: #86909c;
+      min-height: 14px;
+    }
+    .ci-agent-status.error {
+      color: #f53f3f;
+    }
+    .ci-agent-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .ci-action {
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #4e5969;
+      cursor: pointer;
+      border-radius: 8px;
+      user-select: none;
+    }
+    .ci-action:hover {
+      background: rgba(0, 0, 0, 0.06);
+      color: #1d2129;
+    }
+    .ci-action.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+    .ci-agent-output {
+      margin: 0;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid #e5e6eb;
+      background: #f7f8fa;
+      color: #1d2129;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 11px;
+      line-height: 1.45;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        'Liberation Mono', 'Courier New', monospace;
+    }
+    .ci-agent-reasoning {
+      background: #f2f7ff;
+    }
+    .ci-agent-actions {
+      background: #f6f6f6;
+      color: #4e5969;
+    }
+    .ci-agent-trace {
+      background: #111827;
+      color: #e5e7eb;
     }
     .element-info-top {
       top: -4px;

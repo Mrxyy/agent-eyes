@@ -1,4 +1,3 @@
-/// <reference types="node" />
 import { Server } from 'http';
 import type { Editor } from 'launch-ide';
 export type HotKey = 'ctrlKey' | 'altKey' | 'metaKey' | 'shiftKey';
@@ -195,5 +194,61 @@ export type CodeOptions = {
      * Only supports MacOS. If the editor is in the support list, it is strongly recommended to set `launchType: 'open'`. The support list can be found at: [which editor supports to be launched by open](https://github.com/zh-lx/launch-ide?tab=readme-ov-file#which-editor-supports-to-be-launched-by-open).
      */
     launchType?: 'exec' | 'open';
+    /**
+     * @zh 本地 Agent（ACP）配置，用于基于选中上下文进行代码更新
+     * @en Local Agent (ACP) config for code updates based on selected context
+     */
+    agent?: {
+        /**
+         * @zh ACP provider 配置。开启后，server 会暴露 `POST /agent` 接口
+         * @en ACP provider config. When enabled, the server exposes `POST /agent`
+         */
+        acp?: {
+            /**
+             * @zh ACP agent 启动命令，例如 `codex-acp` / `claude-code-acp`。如不配置 agent，server 会默认尝试使用 `CODE_INSPECTOR_ACP_COMMAND` 或 `codex-acp`
+             * @en ACP agent command, e.g. `codex-acp` / `claude-code-acp`
+             */
+            command: string;
+            /**
+             * @zh 启动参数
+             * @en command args
+             */
+            args?: string[];
+            /**
+             * @zh 认证方法 ID（若 agent 需要）
+             * @en auth method id (if needed)
+             */
+            authMethodId?: string;
+            /**
+             * @zh 是否持久化会话（复用 agent 进程）
+             * @en whether persist session (reuse agent process)
+             */
+            persistSession?: boolean;
+            /**
+             * @zh 附加 MCP servers 配置
+             * @en extra MCP servers
+             */
+            mcpServers?: Array<{
+                type: 'stdio';
+                name: string;
+                command: string;
+                args?: string[];
+                env?: Record<string, string>;
+            } | {
+                type: 'http' | 'sse';
+                name: string;
+                url: string;
+                headers?: Array<{
+                    name: string;
+                    value: string;
+                }>;
+            } | {
+                command: string;
+                args?: string[];
+                env?: Record<string, string>;
+                name?: string;
+            }>;
+        };
+    };
 };
 export {};

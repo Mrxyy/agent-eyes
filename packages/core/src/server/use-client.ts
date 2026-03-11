@@ -39,10 +39,39 @@ if (typeof __dirname !== 'undefined') {
 
 // 这个路径是根据打包后来的
 export const clientJsPath = path.resolve(compatibleDirname, './client.umd.js');
-const jsClientCode = fs.readFileSync(clientJsPath, 'utf-8');
-
 const iifeClientJsPath = path.resolve(compatibleDirname, './client.iife.js');
-const iifeClientJsCode = fs.readFileSync(iifeClientJsPath, 'utf-8');
+
+type ClientBundleCache = { mtimeMs: number; code: string };
+let umdClientCache: ClientBundleCache | undefined;
+let iifeClientCache: ClientBundleCache | undefined;
+
+function readFileCached(
+  filePath: string,
+  cache: ClientBundleCache | undefined
+): { code: string; cache: ClientBundleCache | undefined } {
+  try {
+    const stat = fs.statSync(filePath);
+    if (cache?.mtimeMs === stat.mtimeMs) {
+      return { code: cache.code, cache };
+    }
+    const code = fs.readFileSync(filePath, 'utf-8');
+    return { code, cache: { mtimeMs: stat.mtimeMs, code } };
+  } catch {
+    return { code: cache?.code || '', cache };
+  }
+}
+
+function getUmdClientCode() {
+  const { code, cache } = readFileCached(clientJsPath, umdClientCache);
+  umdClientCache = cache;
+  return code;
+}
+
+function getIifeClientCode() {
+  const { code, cache } = readFileCached(iifeClientJsPath, iifeClientCache);
+  iifeClientCache = cache;
+  return code;
+}
 
 const NextEmptyElementName = 'CodeInspectorEmptyElement';
 export function getInjectedCode(
@@ -157,7 +186,7 @@ export function getWebComponentCode(options: CodeOptions, port: number) {
 ;(function (){
   if (typeof window !== 'undefined') {
     if (!document.documentElement.querySelector('code-inspector-component')) {
-      ${bundler === 'mako' ? iifeClientJsCode : jsClientCode};
+      ${bundler === 'mako' ? getIifeClientCode() : getUmdClientCode()};
       
       var inspector = document.createElement('code-inspector-component');
       inspector.port = ${port};
@@ -238,6 +267,9 @@ export function getHidePathAttrCode() {
 
 // normal entry file
 function recordEntry(record: RecordInfo, file: string, isNextjs: boolean) {
+  if (getProjectRecord(record)?.injectTo?.length) {
+    return;
+  }
   if (isNextjs) {
     const content = fs.readFileSync(file, 'utf-8');
     if (content === addNextEmptyElementToEntry(content)) {
@@ -373,6 +405,7 @@ export async function getCodeWithWebComponent({
 }
 
 function writeEslintRcFile(targetPath: string) {
+  fs.mkdirSync(targetPath, { recursive: true });
   const eslintFilePath = path.resolve(targetPath, './.eslintrc.js');
   if (!fs.existsSync(eslintFilePath)) {
     const content = `
@@ -384,6 +417,16 @@ module.exports = {
 }
 `;
     fs.writeFileSync(eslintFilePath, content, 'utf-8');
+  } else {
+    try {
+      const current = fs.readFileSync(eslintFilePath, 'utf-8');
+      if (current.includes('\\n')) {
+        const content = `module.exports = {\n  root: true,\n  parserOptions: {\n    ecmaVersion: 6\n  },\n}\n`;
+        fs.writeFileSync(eslintFilePath, content, 'utf-8');
+      }
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -394,6 +437,17 @@ function writeWebComponentFile(
 ) {
   const webComponentFileName = `append-code-${port}.js`;
   const webComponentFilePath = path.resolve(targetPath, webComponentFileName);
+  fs.mkdirSync(targetPath, { recursive: true });
+  try {
+    if (fs.existsSync(webComponentFilePath)) {
+      const current = fs.readFileSync(webComponentFilePath, 'utf-8');
+      if (current === content) {
+        return webComponentFilePath;
+      }
+    }
+  } catch {
+    // ignore
+  }
   fs.writeFileSync(webComponentFilePath, content, 'utf-8');
   return webComponentFilePath;
 }

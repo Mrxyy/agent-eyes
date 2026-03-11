@@ -26,6 +26,8 @@ export default defineConfig({
         'portfinder',
         'child_process',
         '@vue/compiler-dom',
+        'ai',
+        '@mcpc-tech/acp-ai-provider',
       ],
     },
     target: ['node8', 'es2015'],

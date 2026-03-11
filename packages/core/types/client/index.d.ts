@@ -26,6 +26,9 @@ interface TreeNode extends SourceInfo {
     element: HTMLElement;
     depth: number;
 }
+interface BreadcrumbNode extends SourceInfo {
+    element: HTMLElement;
+}
 interface ActiveNode {
     top?: string;
     bottom?: string;
@@ -101,9 +104,24 @@ export declare class CodeInspectorComponent extends LitElement {
     internalLocate: boolean;
     internalCopy: boolean;
     internalTarget: boolean;
+    chatOpen: boolean;
+    overlayMode: 'full' | 'outline';
+    private forceOutlineNextCover;
+    breadcrumb: BreadcrumbNode[];
+    breadcrumbIndex: number;
+    requirement: string;
+    agentOutput: string;
+    agentLoading: boolean;
+    agentError: string;
+    agentReasoning: string;
+    agentActions: string;
+    agentTrace: string;
+    private agentTraceType;
+    private agentAbortController;
     inspectorSwitchRef: HTMLDivElement;
     codeInspectorContainerRef: HTMLDivElement;
     elementInfoRef: HTMLDivElement;
+    agentInputRef?: HTMLTextAreaElement;
     nodeTreeRef: HTMLDivElement;
     nodeTreeTitleRef: HTMLDivElement;
     nodeTreeTooltipRef: HTMLDivElement;
@@ -134,6 +152,20 @@ export declare class CodeInspectorComponent extends LitElement {
         };
     }>;
     renderCover: (target: HTMLElement) => Promise<void>;
+    private parseSourceInfoFromPath;
+    private buildDomBreadcrumb;
+    private getComponentFiberInfo;
+    private findComponentFromDomPath;
+    private buildDomCodeBreadcrumb;
+    private getReactFiberFromDom;
+    private getNearestDomFromFiber;
+    private buildReactBreadcrumb;
+    private trimBreadcrumbByPath;
+    private buildBreadcrumb;
+    private getBreadcrumbDisplayParts;
+    private scrollActiveBreadcrumbIntoView;
+    private openChat;
+    private closeChat;
     getAstroFilePath: (target: HTMLElement) => string;
     getSourceInfo: (target: HTMLElement) => SourceInfo | null;
     removeCover: (force?: boolean | MouseEvent) => void;
@@ -165,12 +197,19 @@ export declare class CodeInspectorComponent extends LitElement {
     generateNodeTree: (nodePath: HTMLElement[]) => TreeNode;
     handlePointerDown: (e: PointerEvent) => void;
     handleKeyUp: (e: KeyboardEvent) => void;
+    private jumpBreadcrumb;
+    private gotoParentBreadcrumb;
+    private gotoChildBreadcrumb;
+    private cancelAgent;
+    private buildClientContextPrompt;
+    private submitAgent;
+    private streamAgentWithXhr;
     printTip: () => void;
     getMousePosition: (e: MouseEvent | TouchEvent) => {
         x: number;
         y: number;
     };
-    recordMousePosition: (e: MouseEvent | TouchEvent, target: 'switch' | 'nodeTree') => void;
+    recordMousePosition: (e: MouseEvent | TouchEvent, target: "switch" | "nodeTree") => void;
     handleMouseUp: (e: MouseEvent | TouchEvent) => void;
     switch: (e: Event) => void;
     handleClickTreeNode: (node: TreeNode) => void;

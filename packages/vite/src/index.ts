@@ -8,6 +8,8 @@ import {
   isDev,
   getMappingFilePath,
   isExcludedFile,
+  getProjectRecord,
+  clientJsPath,
 } from '@code-inspector/core';
 import chalk from 'chalk';
 
@@ -95,21 +97,23 @@ export function ViteCodeInspectorPlugin(options: Options) {
       record.root = config.root;
     },
     async transform(code: string, id: string) {
-      if (isExcludedFile(id, options)) {
+      const [_completePath, query = ''] = id.split('?', 2);
+      const completePath = normalizePath(_completePath);
+
+      if (isExcludedFile(completePath, options)) {
         return code;
       }
 
       code = await getCodeWithWebComponent({
         options,
-        file: id,
+        file: completePath,
         code,
         record,
       });
 
       const { escapeTags = [], mappings } = options;
 
-      const [_completePath, query] = id.split('?', 2); // 当前文件的绝对路径
-      let filePath = normalizePath(_completePath);
+      let filePath = completePath;
       filePath = getMappingFilePath(filePath, mappings);
       const params = new URLSearchParams(query);
       // 仅对符合正则的生效
@@ -185,6 +189,49 @@ export function ViteCodeInspectorPlugin(options: Options) {
 
         server.config.logger.info = originalLog;
       };
+
+      if (options.importClient !== 'file') {
+        return;
+      }
+
+      const debounce = (fn: () => void, delayMs: number) => {
+        let timer: NodeJS.Timeout | undefined;
+        return () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(fn, delayMs);
+        };
+      };
+
+      const iifePath = clientJsPath.replace(/client\.umd\.js$/, 'client.iife.js');
+      server.watcher.add([clientJsPath, iifePath]);
+
+      const injectTargets = Array.isArray(options.injectTo)
+        ? options.injectTo
+        : options.injectTo
+          ? [options.injectTo]
+          : [];
+
+      const refreshInjectedFile = debounce(() => {
+        const targetFile = injectTargets[0];
+        const port = getProjectRecord(record)?.port;
+        if (!targetFile || !port) {
+          return;
+        }
+        getCodeWithWebComponent({
+          options,
+          record,
+          file: targetFile,
+          code: '',
+          inject: true,
+        }).catch(() => {});
+      }, 300);
+
+      server.watcher.on('change', (file: string) => {
+        const normalized = normalizePath(file);
+        if (normalized === normalizePath(clientJsPath) || normalized === normalizePath(iifePath)) {
+          refreshInjectedFile();
+        }
+      });
     },
   };
 }
