@@ -62,7 +62,7 @@ export function createServer(
         }
 
         const defaultAcpCommand =
-          process.env.CODE_INSPECTOR_ACP_COMMAND || 'codex-acp';
+          process.env.CODE_INSPECTOR_ACP_COMMAND ;
         const acpConfig = options?.agent?.acp || {
           command: defaultAcpCommand,
           args: [],
@@ -78,11 +78,17 @@ export function createServer(
         }
 
         // Read JSON body
+        const maxPayloadMb = Number(
+          process.env.CODE_INSPECTOR_ACP_MAX_PAYLOAD_MB || 10
+        );
+        const maxPayloadBytes = Number.isFinite(maxPayloadMb)
+          ? Math.max(1, maxPayloadMb) * 1024 * 1024
+          : 10 * 1024 * 1024;
         let raw = '';
         await new Promise<void>((resolve, reject) => {
           req.on('data', (chunk: Buffer) => {
             raw += chunk.toString('utf-8');
-            if (raw.length > 1024 * 1024 * 2) {
+            if (raw.length > maxPayloadBytes) {
               reject(new Error('payload too large'));
               req.destroy();
             }
@@ -100,15 +106,17 @@ export function createServer(
           return;
         }
 
-        const userRequirement: string =
+        const userRequirementRaw: string =
           body.requirement || body.prompt || body.message || '';
         const contextFromClient: string =
           body.contextPrompt || body.context || '';
         const modelId: string =
           body.model || process.env.CODE_INSPECTOR_ACP_MODEL || undefined;
         const modeId: string = body.mode || body.modeId || undefined;
+        const filesFromClient = Array.isArray(body.files) ? body.files : [];
+        const userRequirement = String(userRequirementRaw || '').trim();
 
-        if (!userRequirement) {
+        if (!userRequirement && filesFromClient.length === 0) {
           res.writeHead(400, corsHeaders);
           res.end('missing requirement/prompt');
           return;
@@ -179,11 +187,45 @@ export function createServer(
 
         const system = `你是一个本地代码修改 Agent。\n- 目标：根据上下文与用户需求，直接修改项目源码以达成需求。\n- 工具：你可以通过 MCP 工具读取/搜索/写入文件并完成修改（如提供了 filesystem MCP）。\n- 约束：尽量最小改动；修改后保证 TypeScript 编译通过。\n- 输出：用简洁中文说明你改了哪些文件/点。\n`;
 
+        const formatBytes = (bytes: number) => {
+          if (!Number.isFinite(bytes) || bytes <= 0) return '';
+          if (bytes < 1024) return `${bytes}B`;
+          if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+          return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
+        };
+        const maxAttachmentChars = 8000;
+        const attachmentsContext = filesFromClient
+          .map((file: any) => {
+            if (!file) return '';
+            const name = String(file.name || 'file');
+            const type = String(file.type || '');
+            const size = Number(file.size || 0);
+            const sizeLabel = formatBytes(size);
+            const header = `附件：${name}${
+              type ? ` (${type}${sizeLabel ? `, ${sizeLabel}` : ''})` : ''
+            }`;
+            const content =
+              typeof file.text === 'string'
+                ? file.text
+                : typeof file.dataUrl === 'string'
+                ? file.dataUrl
+                : '';
+            if (!content) return header;
+            const trimmed =
+              content.length > maxAttachmentChars
+                ? `${content.slice(0, maxAttachmentChars)}…(已截断)`
+                : content;
+            return `${header}\n内容：\n${trimmed}`;
+          })
+          .filter(Boolean)
+          .join('\n\n');
+        const requirementText = userRequirement || '请参考附件';
         const prompt = [
           generatedContext,
           file ? `\n待修改文件：${file}` : '',
           snippet ? `\n\n文件片段（含行号）：\n${snippet}` : '',
-          `\n\n用户需求：\n${userRequirement}\n`,
+          attachmentsContext ? `\n\n用户附件：\n${attachmentsContext}` : '',
+          `\n\n用户需求：\n${requirementText}\n`,
         ]
           .filter(Boolean)
           .join('\n');
@@ -379,40 +421,75 @@ export function createServer(
               if (event) res.write(`event: ${event}\n`);
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             };
-            for await (const part of result.fullStream) {
+            const normalizeStreamPart = (part: any) => {
+              if (!part || typeof part !== 'object') {
+                if (part === undefined || part === null) return null;
+                return { type: 'text', text: String(part) };
+              }
               switch (part.type) {
+                case 'text':
+                case 'reasoning':
+                case 'source':
+                case 'file':
+                case 'start-step':
+                case 'finish-step':
+                  return part;
                 case 'text-delta':
-                  writeSse({ type: 'text-delta', delta: part.text });
-                  break;
+                  return { type: 'text', text: part.text ?? part.delta ?? '' };
                 case 'reasoning-delta':
-                  writeSse({ type: 'reasoning-delta', delta: part.delta });
-                  break;
+                  return {
+                    type: 'reasoning',
+                    text: part.delta ?? part.text ?? '',
+                    providerMetadata: part.providerMetadata,
+                  };
                 case 'tool-call':
-                  writeSse({
+                  return {
                     type: 'tool-call',
                     toolCallId: part.toolCallId,
                     toolName: part.toolName,
-                    args: part.args,
-                  });
-                  break;
+                    input:
+                      part.input ??
+                      part.args ??
+                      part.arguments ??
+                      part.parameters,
+                  };
+                case 'tool-call-streaming-start':
+                  return {
+                    type: 'tool-call-streaming-start',
+                    toolCallId: part.toolCallId,
+                    toolName: part.toolName,
+                  };
+                case 'tool-call-delta':
+                  return {
+                    type: 'tool-call-delta',
+                    toolCallId: part.toolCallId,
+                    toolName: part.toolName,
+                    argsTextDelta: part.argsTextDelta ?? part.delta ?? '',
+                  };
                 case 'tool-result':
-                  writeSse({
+                  return {
                     type: 'tool-result',
                     toolCallId: part.toolCallId,
                     toolName: part.toolName,
-                    result: part.result,
-                  });
-                  break;
+                    input: part.input ?? part.args ?? part.parameters,
+                    output: part.output ?? part.result,
+                  };
                 case 'error':
-                  writeSse({ type: 'error', message: String(part.error) });
-                  break;
-                default:
-                  break;
+                  return {
+                    type: 'error',
+                    message: String(part.error ?? part.message ?? part),
+                  };
               }
-              try {
-                (res as any).flush?.();
-              } catch {
-                // ignore
+            };
+            for await (const part of result.fullStream) {
+              const normalized = normalizeStreamPart(part);
+              if (normalized) {
+                writeSse(normalized);
+                try {
+                  (res as any).flush?.();
+                } catch {
+                  // ignore
+                }
               }
             }
             res.write('event: done\ndata: {}\n\n');

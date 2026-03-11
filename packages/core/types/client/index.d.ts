@@ -1,4 +1,6 @@
 import { LitElement, TemplateResult } from 'lit';
+import type { AgentUiConfig } from '../shared';
+import type { BreadcrumbNode, ComponentFiberInfo, SourceInfo } from './reactBreadcrumb';
 interface Position {
     left?: string;
     right?: string;
@@ -6,12 +8,6 @@ interface Position {
     bottom?: string;
     transform?: string;
     maxHeight?: string;
-}
-interface SourceInfo {
-    name: string;
-    path: string;
-    line: number;
-    column: number;
 }
 interface ElementTipStyle {
     vertical: string;
@@ -26,9 +22,6 @@ interface TreeNode extends SourceInfo {
     element: HTMLElement;
     depth: number;
 }
-interface BreadcrumbNode extends SourceInfo {
-    element: HTMLElement;
-}
 interface ActiveNode {
     top?: string;
     bottom?: string;
@@ -37,6 +30,42 @@ interface ActiveNode {
     content?: string;
     visibility?: 'visible' | 'hidden';
     class?: 'tooltip-top' | 'tooltip-bottom';
+}
+type AgentStreamEventType = 'text' | 'reasoning' | 'tool-call' | 'tool-result' | 'source' | 'file' | 'error' | 'start-step' | 'finish-step' | 'unknown';
+interface AgentFileSummary {
+    mediaType: string;
+    size?: number;
+    hasContent?: boolean;
+}
+interface AgentStreamEvent {
+    id: string;
+    type: AgentStreamEventType;
+    text?: string;
+    toolCallId?: string;
+    toolName?: string;
+    input?: string;
+    output?: string;
+    inputRaw?: unknown;
+    outputRaw?: unknown;
+    source?: {
+        id?: string;
+        url?: string;
+        title?: string;
+        sourceType?: string;
+    };
+    file?: AgentFileSummary;
+    request?: string;
+    response?: string;
+    message?: string;
+}
+interface AgentAttachment {
+    id: string;
+    name: string;
+    type: string;
+    size: number;
+    isImage: boolean;
+    dataUrl?: string;
+    text?: string;
 }
 export declare class CodeInspectorComponent extends LitElement {
     hotKeys: string;
@@ -49,6 +78,7 @@ export declare class CodeInspectorComponent extends LitElement {
     target: string;
     targetNode: HTMLElement | null;
     ip: string;
+    agentUi: AgentUiConfig | null;
     private wheelThrottling;
     modeKey: string;
     position: {
@@ -110,7 +140,12 @@ export declare class CodeInspectorComponent extends LitElement {
     breadcrumb: BreadcrumbNode[];
     breadcrumbIndex: number;
     requirement: string;
-    agentOutput: string;
+    agentProvider: string;
+    agentMode: string;
+    agentProviderOpen: boolean;
+    agentModeOpen: boolean;
+    agentFiles: AgentAttachment[];
+    agentEvents: AgentStreamEvent[];
     agentLoading: boolean;
     agentError: string;
     agentReasoning: string;
@@ -118,10 +153,18 @@ export declare class CodeInspectorComponent extends LitElement {
     agentTrace: string;
     private agentTraceType;
     private agentAbortController;
+    private agentEventId;
+    private agentToolCallDrafts;
+    componentChain: ComponentFiberInfo[];
+    componentChainIndex: number;
+    private componentBreadcrumbsByChain;
+    private componentBreadcrumbIndexByChain;
     inspectorSwitchRef: HTMLDivElement;
     codeInspectorContainerRef: HTMLDivElement;
     elementInfoRef: HTMLDivElement;
     agentInputRef?: HTMLTextAreaElement;
+    agentLogRef?: HTMLDivElement;
+    agentFileInputRef?: HTMLInputElement;
     nodeTreeRef: HTMLDivElement;
     nodeTreeTitleRef: HTMLDivElement;
     nodeTreeTooltipRef: HTMLDivElement;
@@ -162,6 +205,9 @@ export declare class CodeInspectorComponent extends LitElement {
     private buildReactBreadcrumb;
     private trimBreadcrumbByPath;
     private buildBreadcrumb;
+    private pickTargetNode;
+    private buildBreadcrumbFromNodePath;
+    private buildNodeTreeFromBreadcrumb;
     private getBreadcrumbDisplayParts;
     private scrollActiveBreadcrumbIntoView;
     private openChat;
@@ -198,9 +244,59 @@ export declare class CodeInspectorComponent extends LitElement {
     handlePointerDown: (e: PointerEvent) => void;
     handleKeyUp: (e: KeyboardEvent) => void;
     private jumpBreadcrumb;
+    private handleBreadcrumbClick;
     private gotoParentBreadcrumb;
     private gotoChildBreadcrumb;
+    private gotoPrevComponentBreadcrumb;
+    private gotoNextComponentBreadcrumb;
+    private rebuildBreadcrumbForComponent;
     private cancelAgent;
+    private nextAgentEventId;
+    private resetAgentStream;
+    private scrollAgentLogToBottom;
+    private truncateText;
+    private formatAgentValue;
+    private formatBytes;
+    private formatAgentFileSummary;
+    private tryParseJsonString;
+    private getAgentHostLabel;
+    private formatPathLabel;
+    private describeToolCall;
+    private countDiffLines;
+    private describeToolResult;
+    private getToolCallMeta;
+    private getToolResultMeta;
+    private extractOutputText;
+    private extractDiffPreview;
+    private extractOutputPreview;
+    private buildToolResultPreview;
+    private collectChangedFiles;
+    private splitParagraphs;
+    private buildTimelineBlocks;
+    private addAgentEvent;
+    private updateAgentEvent;
+    private appendAgentText;
+    private replaceAgentPlainText;
+    private startToolCall;
+    private appendToolCallDelta;
+    private finalizeToolCall;
+    private addToolResult;
+    private addSourceEvent;
+    private addFileEvent;
+    private addErrorEvent;
+    private consumeAgentPart;
+    private syncAgentUiDefaults;
+    private formatAgentFileSize;
+    private estimatePayloadSize;
+    private readFileAsDataUrl;
+    private readFileAsText;
+    private handleAgentAttachClick;
+    private handleAgentFilesSelected;
+    private removeAgentFile;
+    private buildAgentFilesPayload;
+    private getAgentOptionLabel;
+    private toggleAgentMenu;
+    private selectAgentOption;
     private buildClientContextPrompt;
     private submitAgent;
     private streamAgentWithXhr;
@@ -228,6 +324,7 @@ export declare class CodeInspectorComponent extends LitElement {
      * Detach all event listeners
      */
     private detachEventListeners;
+    protected updated(changedProps: Map<PropertyKey, unknown>): void;
     protected firstUpdated(): void;
     disconnectedCallback(): void;
     renderNodeTree: (node: TreeNode) => TemplateResult;

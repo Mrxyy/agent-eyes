@@ -9,7 +9,7 @@ export default defineConfig({
       fileName: '[name]',
       name: 'viteInspectorCore',
     },
-    minify: true,
+    minify: false,
     emptyOutDir: false,
     rollupOptions: {
       external: [

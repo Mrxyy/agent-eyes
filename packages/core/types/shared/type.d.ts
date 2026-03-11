@@ -28,6 +28,24 @@ type SourceInfo = {
     column: number;
 };
 export type EscapeTags = (string | RegExp)[];
+export type AgentUiOption = {
+    value: string;
+    label: string;
+    subLabel?: string;
+    icon?: 'globe' | 'model' | 'search';
+    disabled?: boolean;
+};
+export type AgentUiConfig = {
+    providers?: AgentUiOption[];
+    modes?: AgentUiOption[];
+    defaultProvider?: string;
+    defaultMode?: string;
+    placeholder?: string;
+    enableUpload?: boolean;
+    maxFileSize?: number;
+    maxTotalSize?: number;
+    maxFiles?: number;
+};
 export type Hooks = {
     /**
      * @zh server 端接收到 DOM 源代码定位请求后的钩子函数
@@ -249,6 +267,11 @@ export type CodeOptions = {
                 name?: string;
             }>;
         };
+        /**
+         * @zh Agent 面板 UI 配置（模型/模式/上传等）
+         * @en Agent panel UI config (models/modes/uploads)
+         */
+        ui?: AgentUiConfig;
     };
 };
 export {};

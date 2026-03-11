@@ -180,8 +180,10 @@ export function getWebComponentCode(options: CodeOptions, port: number) {
     ip = false,
     bundler,
     modeKey = 'z',
+    agent,
   } = options || ({} as CodeOptions);
   const { locate = true, copy = false, target = '' } = behavior;
+  const agentUi = agent?.ui;
   return `
 ;(function (){
   if (typeof window !== 'undefined') {
@@ -199,6 +201,7 @@ export function getWebComponentCode(options: CodeOptions, port: number) {
       inspector.target = '${target}';
       inspector.ip = '${getIP(ip)}';
       inspector.modeKey = '${modeKey.toLowerCase() || 'z'}';
+      ${agentUi ? `inspector.agentUi = ${JSON.stringify(agentUi)};` : ''}
       document.documentElement.append(inspector);
     }
   }

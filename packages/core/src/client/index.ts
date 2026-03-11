@@ -2,7 +2,17 @@ import { LitElement, TemplateResult, css, html } from 'lit';
 import { property, query, state } from 'lit/decorators.js';
 import { styleMap } from 'lit/directives/style-map.js';
 import { PathName, DefaultPort } from '../shared';
+import type { AgentUiConfig, AgentUiOption } from '../shared';
 import { formatOpenPath } from 'launch-ide';
+import {
+  buildBreadcrumb as buildReactFiberBreadcrumb,
+  getComponentFiberInfoList,
+} from './reactBreadcrumb';
+import type {
+  BreadcrumbNode,
+  ComponentFiberInfo,
+  SourceInfo,
+} from './reactBreadcrumb';
 
 const styleId = '__code-inspector-unique-id';
 const AstroFile = 'data-astro-source-file';
@@ -35,30 +45,17 @@ interface Position {
   maxHeight?: string;
 }
 
-interface SourceInfo {
-  name: string; // tagName
-  path: string;
-  line: number;
-  column: number;
-}
-
 interface ElementTipStyle {
   vertical: string;
   horizon: string;
   visibility: string;
-  additionStyle?: {
-    transform: string;
-  };
+  additionStyle?: Record<string, string>;
 }
 
 interface TreeNode extends SourceInfo {
   children: TreeNode[];
   element: HTMLElement;
   depth: number;
-}
-
-interface BreadcrumbNode extends SourceInfo {
-  element: HTMLElement;
 }
 
 type BreadcrumbDisplayPart =
@@ -73,6 +70,83 @@ interface ActiveNode {
   content?: string;
   visibility?: 'visible' | 'hidden';
   class?: 'tooltip-top' | 'tooltip-bottom';
+}
+
+type AgentStreamEventType =
+  | 'text'
+  | 'reasoning'
+  | 'tool-call'
+  | 'tool-result'
+  | 'source'
+  | 'file'
+  | 'error'
+  | 'start-step'
+  | 'finish-step'
+  | 'unknown';
+
+interface AgentFileSummary {
+  mediaType: string;
+  size?: number;
+  hasContent?: boolean;
+}
+
+interface AgentStreamEvent {
+  id: string;
+  type: AgentStreamEventType;
+  text?: string;
+  toolCallId?: string;
+  toolName?: string;
+  input?: string;
+  output?: string;
+  inputRaw?: unknown;
+  outputRaw?: unknown;
+  source?: {
+    id?: string;
+    url?: string;
+    title?: string;
+    sourceType?: string;
+  };
+  file?: AgentFileSummary;
+  request?: string;
+  response?: string;
+  message?: string;
+}
+
+type AgentActivityKind = 'read' | 'list' | 'search' | 'edit' | 'tool';
+
+interface AgentActivityItem {
+  id: string;
+  kind: AgentActivityKind;
+  label: string;
+  detail?: string;
+  status?: 'pending' | 'done';
+  filePath?: string;
+}
+
+type AgentTimelineBlockKind =
+  | 'text'
+  | 'reasoning'
+  | 'tool'
+  | 'source'
+  | 'file'
+  | 'error';
+
+interface AgentTimelineBlock {
+  kind: AgentTimelineBlockKind;
+  text?: string;
+  events: AgentStreamEvent[];
+  call?: AgentStreamEvent;
+  result?: AgentStreamEvent;
+}
+
+interface AgentAttachment {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  isImage: boolean;
+  dataUrl?: string;
+  text?: string;
 }
 
 const PopperWidth = 300;
@@ -105,6 +179,8 @@ export class CodeInspectorComponent extends LitElement {
   targetNode: HTMLElement | null = null;
   @property()
   ip: string = 'localhost';
+  @property({ attribute: false })
+  agentUi: AgentUiConfig | null = null;
 
   private wheelThrottling: boolean = false;
   @property()
@@ -189,21 +265,36 @@ export class CodeInspectorComponent extends LitElement {
   @state()
   requirement = '';
   @state()
-  agentOutput = '';
+  agentProvider = '';
+  @state()
+  agentMode = '';
+  @state()
+  agentProviderOpen = false;
+  @state()
+  agentModeOpen = false;
+  @state()
+  agentFiles: AgentAttachment[] = [];
+  @state()
+  agentEvents: AgentStreamEvent[] = [];
   @state()
   agentLoading = false;
   @state()
   agentError = '';
-  @state()
-  agentReasoning = '';
-  @state()
-  agentActions = '';
-  @state()
-  agentTrace = '';
-
-  private agentTraceType: 'text' | 'reasoning' | '' = '';
 
   private agentAbortController: AbortController | null = null;
+  private agentEventId = 0;
+  private agentToolCallDrafts: Record<
+    string,
+    { index: number; argsText: string; toolName?: string }
+  > = {};
+  private elementInfoResizeObserver?: ResizeObserver;
+  private elementInfoRepositioning = false;
+  @state()
+  componentChain: ComponentFiberInfo[] = [];
+  @state()
+  componentChainIndex = 0;
+  private componentBreadcrumbsByChain: Record<number, BreadcrumbNode[]> = {};
+  private componentBreadcrumbIndexByChain: Record<number, number> = {};
 
   @query('#inspector-switch')
   inspectorSwitchRef!: HTMLDivElement;
@@ -214,6 +305,10 @@ export class CodeInspectorComponent extends LitElement {
   elementInfoRef!: HTMLDivElement;
   @query('#ci-agent-input')
   agentInputRef?: HTMLTextAreaElement;
+  @query('#ci-agent-log')
+  agentLogRef?: HTMLDivElement;
+  @query('#ci-agent-file-input')
+  agentFileInputRef?: HTMLInputElement;
   @query('#inspector-node-tree')
   nodeTreeRef!: HTMLDivElement;
 
@@ -260,6 +355,54 @@ export class CodeInspectorComponent extends LitElement {
   getDomPropertyValue = (target: HTMLElement, property: string) => {
     const computedStyle = window.getComputedStyle(target);
     return Number(computedStyle.getPropertyValue(property).replace('px', ''));
+  };
+
+  private scheduleElementInfoReposition = () => {
+    if (this.elementInfoRepositioning) {
+      return;
+    }
+    this.elementInfoRepositioning = true;
+    requestAnimationFrame(async () => {
+      this.elementInfoRepositioning = false;
+      if (!this.show || this.showNodeTree || !this.targetNode || !this.elementInfoRef) {
+        return;
+      }
+      const { vertical, horizon, additionStyle } =
+        await this.calculateElementInfoPosition(this.targetNode);
+      this.elementTipStyle = {
+        vertical,
+        horizon,
+        visibility: 'visible',
+        additionStyle,
+      };
+    });
+  };
+
+  private getViewportClamp = (
+    left: number,
+    top: number,
+    width: number,
+    height: number,
+    browserWidth: number,
+    browserHeight: number
+  ) => {
+    let translateX = 0;
+    let translateY = 0;
+    if (left < 0) {
+      translateX = -left;
+    } else if (left + width > browserWidth) {
+      translateX = browserWidth - (left + width);
+    }
+    if (top < 0) {
+      translateY = -top;
+    } else if (top + height > browserHeight) {
+      translateY = browserHeight - (top + height);
+    }
+    return { translateX, translateY };
+  };
+
+  private handleViewportChange = () => {
+    this.scheduleElementInfoReposition();
   };
 
   // 计算 element-info 的最佳位置
@@ -375,43 +518,45 @@ export class CodeInspectorComponent extends LitElement {
       },
     ];
 
-    // 检查位置是否超出屏幕
-    const isOutOfScreen = (pos: { left: number; top: number }) => {
-      return (
-        pos.left < 0 ||
-        pos.left + width > browserWidth ||
-        pos.top < 0 ||
-        pos.top + height > browserHeight
-      );
-    };
+    let bestPos: (typeof positions)[number] | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
 
     for (const pos of positions) {
-      const browserWidth = document.documentElement.clientWidth;
-      if (pos.horizon.endsWith('left')) {
-        const overflowWidth = containerLeft + width - browserWidth;
-        if (overflowWidth > 0) {
-          pos.additionStyle = {
-            transform: `translateX(-${overflowWidth}px) ${
-              pos.additionStyle?.transform || ''
-            }`,
-          };
-        }
-      } else {
-        const overflowWidth = width - containerRight;
-        if (overflowWidth > 0) {
-          pos.additionStyle = {
-            transform: `translateX(${overflowWidth}px) ${
-              pos.additionStyle?.transform || ''
-            }`,
-          };
-        }
+      const { translateX, translateY } = this.getViewportClamp(
+        pos.left,
+        pos.top,
+        width,
+        height,
+        browserWidth,
+        browserHeight
+      );
+      const distance = Math.abs(translateX) + Math.abs(translateY);
+      const transformParts: string[] = [];
+      if (pos.vertical === 'element-info-top') {
+        transformParts.push('translateY(-100%)');
       }
-      if (!isOutOfScreen(pos)) {
-        return pos;
+      if (pos.additionStyle?.transform) {
+        transformParts.push(pos.additionStyle.transform.trim());
+      }
+      if (translateX !== 0 || translateY !== 0) {
+        transformParts.push(`translate(${translateX}px, ${translateY}px)`);
+      }
+      const transform = transformParts.join(' ').trim();
+      const additionStyle = transform
+        ? { ...pos.additionStyle, transform }
+        : pos.additionStyle;
+      const nextPos = { ...pos, additionStyle };
+
+      if (distance === 0) {
+        return nextPos;
+      }
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestPos = nextPos;
       }
     }
-    // 如果所有位置都超出屏幕，返回一个屏幕内侧的位置
-    return positions[0];
+    // 如果所有位置都需要调整，返回偏移量最小的一个
+    return bestPos || positions[0];
   };
 
   // 渲染遮罩层
@@ -485,239 +630,65 @@ export class CodeInspectorComponent extends LitElement {
     }
   };
 
-  private parseSourceInfoFromPath = (paths: string): SourceInfo | null => {
-    if (!paths) return null;
-    const segments = paths.split(':');
-    if (segments.length < 4) return null;
-    const name = segments[segments.length - 1];
-    const column = Number(segments[segments.length - 2]);
-    const line = Number(segments[segments.length - 3]);
-    const path = segments.slice(0, segments.length - 3).join(':');
-    if (!path || !name || Number.isNaN(line) || Number.isNaN(column)) {
-      return null;
+
+
+  private pickTargetNode = (
+    validNodeList: { node: HTMLElement; isAstro: boolean }[]
+  ): HTMLElement | null => {
+    let targetNode: HTMLElement | null = null;
+    for (const { node, isAstro } of validNodeList) {
+      if (isAstro) {
+        return node;
+      }
+      if (!targetNode) {
+        targetNode = node;
+      } else if (this.isSamePositionNode(targetNode, node)) {
+        // Prefer the component callsite when it shares the same rect.
+        targetNode = node;
+      }
     }
-    return { name, path, line, column };
+    return targetNode;
   };
 
-  private buildDomBreadcrumb = (
-    nodePath: EventTarget[],
-    stopDom?: HTMLElement | null
-  ): BreadcrumbNode[] => {
+  private buildBreadcrumbFromNodePath = (
+    nodePath: EventTarget[]
+  ): { items: BreadcrumbNode[]; targetNode: HTMLElement | null } => {
     const nodes = nodePath.filter(
       (n): n is HTMLElement => n instanceof HTMLElement
     );
     const validNodeList = this.getValidNodeList(nodes);
+    const targetNode = this.pickTargetNode(validNodeList);
     const items: BreadcrumbNode[] = [];
-    // root -> target
     for (const { node } of validNodeList.reverse()) {
       const info = this.getSourceInfo(node);
       if (!info) continue;
       items.push({ ...info, element: node });
-      if (stopDom && node === stopDom) break;
+      if (targetNode && node === targetNode) break;
     }
-    return items;
+    return { items, targetNode };
   };
 
-  private getComponentFiberInfo = (dom: HTMLElement) => {
-    let fiber = this.getReactFiberFromDom(dom);
-    if (!fiber) {
-      let parent: HTMLElement | null = dom.parentElement;
-      let guard = 0;
-      while (parent && guard++ < 50) {
-        fiber = this.getReactFiberFromDom(parent);
-        if (fiber) break;
-        parent = parent.parentElement;
+  private buildNodeTreeFromBreadcrumb = (
+    items: BreadcrumbNode[]
+  ): TreeNode | null => {
+    if (items.length === 0) return null;
+    let root: TreeNode | null = null;
+    let depth = 1;
+    let preNode: TreeNode | null = null;
+    for (const item of items) {
+      const node: TreeNode = {
+        ...item,
+        children: [],
+        depth: depth++,
+      };
+      if (preNode) {
+        preNode.children.push(node);
+      } else {
+        root = node;
       }
+      preNode = node;
     }
-    if (!fiber) return null;
-
-    const getFiberName = (f: any) => {
-      const t = f?.elementType ?? f?.type;
-      if (!t) return '';
-      if (typeof t === 'string') return '';
-      if (typeof t === 'function') {
-        return t.displayName || t.name || '';
-      }
-      if (typeof t === 'object') {
-        return (
-          t.displayName ||
-          t.name ||
-          t.render?.displayName ||
-          t.render?.name ||
-          t.type?.displayName ||
-          t.type?.name ||
-          ''
-        );
-      }
-      return '';
-    };
-
-    let current: any = fiber;
-    let guard = 0;
-    let fiberRootDom = null; 
-    fiberRootDom = current
-    while (current && guard++ < 200) {
-      const name = getFiberName(current);
-      console.log(current,name,"getFiberName")
-      if (name) {
-        const propsPath =
-          current.memoizedProps?.[PathName] ??
-          current.pendingProps?.[PathName];
-        const sourceInfo =
-          typeof propsPath === 'string'
-            ? this.parseSourceInfoFromPath(propsPath)
-            : null;
-        const componentDom = fiberRootDom;
-        return { name, sourceInfo, componentDom };
-      }
-      fiberRootDom =  this.getNearestDomFromFiber(current)
-      current = current.return;
-    }
-    return null;
-  };
-
-  private findComponentFromDomPath = (nodePath: EventTarget[]) => {
-    const nodes = nodePath.filter(
-      (n): n is HTMLElement => n instanceof HTMLElement
-    );
-    const isComponent = (name: string) => /^[A-Z]/.test(name);
-    for (const node of nodes) {
-      const info = this.getSourceInfo(node);
-      if (info && isComponent(info.name)) {
-        return { info, element: node };
-      }
-    }
-    return null;
-  };
-
-  private buildDomCodeBreadcrumb = (
-    nodePath: EventTarget[]
-  ): BreadcrumbNode[] => {
-    const component = this.findComponentFromDomPath(nodePath);
-    if (!component) return [];
-
-    const items: BreadcrumbNode[] = [];
-    items.push({
-      ...component.info,
-      element: component.element,
-    });
-
-    const pathNodes: HTMLElement[] = [];
-    const target = (nodePath.find((n) => n instanceof HTMLElement) ||
-      component.element) as HTMLElement;
-    let cursor: HTMLElement | null = target;
-    let guard = 0;
-    while (cursor && guard++ < 200) {
-      pathNodes.unshift(cursor);
-      if (cursor === component.element) break;
-      cursor = cursor.parentElement as HTMLElement | null;
-    }
-
-    for (const node of pathNodes) {
-      const nodeInfo = this.getSourceInfo(node);
-      if (!nodeInfo) continue;
-      items.push({ ...nodeInfo, element: node });
-    }
-
-    return items;
-  };
-
-  private getReactFiberFromDom = (dom: HTMLElement): any => {
-    try {
-      const anyDom = dom as any;
-      for (const key in anyDom) {
-        if (key.startsWith('__reactFiber$')) {
-          return anyDom[key];
-        }
-      }
-      for (const key in anyDom) {
-        if (key.startsWith('__reactInternalInstance$')) {
-          return anyDom[key];
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return null;
-  };
-
-  private getNearestDomFromFiber = (fiber: any): HTMLElement | null => {
-    let current = fiber;
-    let guard = 0;
-    while (current && guard++ < 80) {
-      if (current.stateNode instanceof HTMLElement) {
-        return current.stateNode;
-      }
-      current = current.child;
-    }
-    return null;
-  };
-
-  private buildReactBreadcrumb = (dom: HTMLElement): BreadcrumbNode[] => {
-    const info = this.getComponentFiberInfo(dom);
-    if (!info) return [];
-    const componentDom = info.componentDom || dom;
-
-    console.log(info,componentDom,"componentDom")
-
-    const fallbackNodeInfo =
-      this.getSourceInfo(dom) ||
-      (this.targetNode ? this.getSourceInfo(this.targetNode) : null);
-    const componentNodeInfo = info.sourceInfo || fallbackNodeInfo;
-    if (!componentNodeInfo) return [];
-
-    const items: BreadcrumbNode[] = [];
-    items.push({
-      ...componentNodeInfo,
-      name: info.name,
-      element: componentDom,
-    });
-
-    const pathNodes: HTMLElement[] = [];
-    let current: HTMLElement | null = dom;
-    let guard = 0;
-    while (current && guard++ < 200) {
-      pathNodes.unshift(current);
-      if (current === componentDom) break;
-      current = current.parentElement as HTMLElement | null;
-    }
-
-    for (const node of pathNodes) {
-      const nodeInfo = this.getSourceInfo(node);
-      if (!nodeInfo) continue;
-      items.push({ ...nodeInfo, element: node });
-    }
-
-    return items;
-  };
-
-  private trimBreadcrumbByPath = (
-    items: BreadcrumbNode[],
-    path?: string
-  ): BreadcrumbNode[] => {
-    if (!path || items.length === 0) return items;
-    let end = items.length - 1;
-    let start = end;
-    while (start >= 0 && items[start].path === path) {
-      start--;
-    }
-    const sliced = items.slice(start + 1, end + 1);
-    return sliced.length > 0 ? sliced : items;
-  };
-
-  private buildBreadcrumb = (
-    nodePath: EventTarget[],
-    dom?: HTMLElement | null,
-    componentInfo?: { componentDom?: HTMLElement | null }
-  ): BreadcrumbNode[] => {
-    const reactItems = dom ? this.buildReactBreadcrumb(dom) : [];
-    if (reactItems.length > 0) return reactItems;
-
-    const stopDom = componentInfo?.componentDom || null;
-    const domCodeItems = this.buildDomCodeBreadcrumb(nodePath);
-    if (domCodeItems.length > 0) return domCodeItems;
-    const domItems = this.buildDomBreadcrumb(nodePath, stopDom);
-    return this.trimBreadcrumbByPath(domItems, this.element?.path);
+    return root;
   };
 
   private getBreadcrumbDisplayParts = (): BreadcrumbDisplayPart[] => {
@@ -773,27 +744,68 @@ export class CodeInspectorComponent extends LitElement {
   private openChat = async (nodePath: EventTarget[], dom?: HTMLElement) => {
     this.chatOpen = true;
     this.requirement = '';
-    this.agentOutput = '';
-    this.agentError = '';
-    const targetDom = dom || this.targetNode ;
-    const componentInfo = targetDom
-      ? this.getComponentFiberInfo(targetDom)
-      : null;
-    if (componentInfo?.componentDom) {
-      this.targetNode = targetDom;
+    this.resetAgentStream();
+    this.agentLoading = false;
+    const targetDom = dom || this.targetNode;
+    let componentInfo: ComponentFiberInfo | null = null;
+    if (targetDom) {
+      const chain = getComponentFiberInfoList(targetDom);
+      this.componentChain = chain;
+      this.componentChainIndex = 0;
+      componentInfo = chain[0] || null;
+    } else {
+      this.componentChain = [];
+      this.componentChainIndex = 0;
     }
-    this.breadcrumb = this.buildBreadcrumb(
-      nodePath,
-      targetDom || undefined,
-      componentInfo || undefined
-    );
+    let targetNode: HTMLElement | null = null;
+    if (componentInfo) {
+      if (componentInfo.componentDom) {
+        this.targetNode = targetDom;
+      }
+      this.breadcrumb = buildReactFiberBreadcrumb(
+        nodePath,
+        targetDom || undefined,
+        componentInfo || undefined,
+        {
+          getSourceInfo: (node) => this.getSourceInfo(node),
+          getValidNodeList: (nodes) => this.getValidNodeList(nodes),
+          elementPath: this.element?.path,
+          targetNode: this.targetNode,
+        }
+      );
+    } else {
+      const result = this.buildBreadcrumbFromNodePath(nodePath);
+      this.breadcrumb = result.items;
+      targetNode = result.targetNode;
+      if (!targetDom && targetNode) {
+        this.targetNode = targetNode;
+      }
+    }
+    
     this.breadcrumbIndex = Math.max(0, this.breadcrumb.length - 1);
+    if (this.componentChain.length > 0) {
+      this.componentBreadcrumbsByChain = {
+        [this.componentChainIndex]: this.breadcrumb,
+      };
+      this.componentBreadcrumbIndexByChain = {
+        [this.componentChainIndex]: this.breadcrumbIndex,
+      };
+    } else {
+      this.componentBreadcrumbsByChain = {};
+      this.componentBreadcrumbIndexByChain = {};
+    }
     await this.updateComplete;
-    if (componentInfo?.componentDom && targetDom) {
-      await this.renderCover(targetDom);
-    } else if (this.targetNode) {
+    const activeTarget =
+      targetDom ||
+      targetNode ||
+      this.targetNode ||
+      this.breadcrumb[this.breadcrumb.length - 1]?.element ||
+      null;
+    if (activeTarget && activeTarget !== this.targetNode) {
+      await this.renderCover(activeTarget);
+    } else if (activeTarget) {
       const { vertical, horizon, additionStyle } =
-        await this.calculateElementInfoPosition(this.targetNode);
+        await this.calculateElementInfoPosition(activeTarget);
       this.elementTipStyle = {
         vertical,
         horizon,
@@ -808,10 +820,16 @@ export class CodeInspectorComponent extends LitElement {
   private closeChat = () => {
     this.chatOpen = false;
     this.requirement = '';
-    this.agentOutput = '';
-    this.agentError = '';
+    this.agentFiles = [];
+    this.agentProviderOpen = false;
+    this.agentModeOpen = false;
+    this.resetAgentStream();
     this.breadcrumb = [];
     this.breadcrumbIndex = 0;
+    this.componentChain = [];
+    this.componentChainIndex = 0;
+    this.componentBreadcrumbsByChain = {};
+    this.componentBreadcrumbIndexByChain = {};
     if (this.agentAbortController) {
       this.agentAbortController.abort();
       this.agentAbortController = null;
@@ -829,6 +847,7 @@ export class CodeInspectorComponent extends LitElement {
   };
 
   getSourceInfo = (target: HTMLElement): SourceInfo | null => {
+
     let paths =
       target.getAttribute?.(PathName) ||
       (target as CodeInspectorHtmlElement)[PathName] ||
@@ -843,6 +862,7 @@ export class CodeInspectorComponent extends LitElement {
     const column = Number(segments[segments.length - 2]);
     const line = Number(segments[segments.length - 3]);
     const path = segments.slice(0, segments.length - 3).join(':');
+    console.log(paths,name,"validNodeList")
     return { name, path, line, column };
   };
 
@@ -1125,19 +1145,7 @@ export class CodeInspectorComponent extends LitElement {
     ) {
       const nodePath = e.composedPath() as HTMLElement[];
       const validNodeList = this.getValidNodeList(nodePath);
-      let targetNode;
-      for (const { node, isAstro } of validNodeList) {
-        if (isAstro) {
-          targetNode = node;
-          break;
-        }
-        if (!targetNode) {
-          targetNode = node;
-        } else if (this.isSamePositionNode(targetNode, node)) {
-          // 优先寻找组件被调用处源码
-          targetNode = node;
-        }
-      }
+      const targetNode = this.pickTargetNode(validNodeList);
       if (targetNode) {
         this.renderCover(targetNode);
       } else {
@@ -1199,14 +1207,21 @@ export class CodeInspectorComponent extends LitElement {
       return;
     }
 
+    if (e instanceof MouseEvent && e.metaKey) {
+      if ((this.isTracking(e) || this.open) && this.show) {
+        e.stopPropagation();
+        e.preventDefault();
+        this.trackCode();
+      }
+      return;
+    }
+
     if (this.isTracking(e) || this.open) {
       if (this.show) {
         // 阻止冒泡
         e.stopPropagation();
         // 阻止默认事件
         e.preventDefault();
-        // 触发功能
-        this.trackCode();
         void this.openChat(
           composedPath,
           (this.targetNode || (e.target as HTMLElement)) ?? undefined
@@ -1235,12 +1250,39 @@ export class CodeInspectorComponent extends LitElement {
   };
 
   generateNodeTree = (nodePath: HTMLElement[]): TreeNode => {
-    let root: TreeNode;
+    const validNodeList = this.getValidNodeList(nodePath);
+    const targetNode = this.pickTargetNode(validNodeList);
+    const componentInfo = targetNode
+      ? getComponentFiberInfoList(targetNode)[0] || null
+      : null;
+    let items: BreadcrumbNode[] = [];
+    if (componentInfo && targetNode) {
+      const elementPath = this.getSourceInfo(targetNode)?.path;
+      items = buildReactFiberBreadcrumb(
+        nodePath,
+        targetNode,
+        componentInfo,
+        {
+          getSourceInfo: (node) => this.getSourceInfo(node),
+          getValidNodeList: (nodes) => this.getValidNodeList(nodes),
+          elementPath,
+          targetNode,
+        }
+      );
+    } else {
+      const result = this.buildBreadcrumbFromNodePath(nodePath);
+      items = result.items;
+    }
 
+    const root = this.buildNodeTreeFromBreadcrumb(items);
+    if (root) {
+      return root;
+    }
+
+    let fallbackRoot: TreeNode | null = null;
     let depth = 1;
-    let preNode = null;
-
-    for (const element of nodePath.reverse()) {
+    let preNode: TreeNode | null = null;
+    for (const element of [...nodePath].reverse()) {
       const sourceInfo = this.getSourceInfo(element);
       if (!sourceInfo) continue;
 
@@ -1254,12 +1296,12 @@ export class CodeInspectorComponent extends LitElement {
       if (preNode) {
         preNode.children.push(node);
       } else {
-        root = node;
+        fallbackRoot = node;
       }
       preNode = node;
     }
 
-    return root!;
+    return fallbackRoot!;
   };
 
   // disabled 的元素及其子元素无法触发 click 事件
@@ -1282,8 +1324,6 @@ export class CodeInspectorComponent extends LitElement {
         e.stopPropagation();
         // 阻止默认事件
         e.preventDefault();
-        // 唤醒 vscode
-        this.trackCode();
         // 清除遮罩层
         this.removeCover();
         if (this.autoToggle) {
@@ -1308,11 +1348,28 @@ export class CodeInspectorComponent extends LitElement {
   private jumpBreadcrumb = async (index: number) => {
     if (index < 0 || index >= this.breadcrumb.length) return;
     this.breadcrumbIndex = index;
+    if (this.componentChain.length > 0) {
+      this.componentBreadcrumbIndexByChain[this.componentChainIndex] = index;
+      this.componentBreadcrumbsByChain[this.componentChainIndex] =
+        this.breadcrumb;
+    }
     const node = this.breadcrumb[index];
     this.forceOutlineNextCover = true;
-    console.log(node,"none")
     await this.renderCover(node.element);
     this.scrollActiveBreadcrumbIntoView();
+  };
+
+  private handleBreadcrumbClick = (index: number, e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.metaKey) {
+      if (index < 0 || index >= this.breadcrumb.length) return;
+      const node = this.breadcrumb[index];
+      this.element = node;
+      this.trackCode();
+      return;
+    }
+    void this.jumpBreadcrumb(index);
   };
 
   private gotoParentBreadcrumb = () => {
@@ -1325,12 +1382,894 @@ export class CodeInspectorComponent extends LitElement {
     void this.jumpBreadcrumb(this.breadcrumbIndex + 1);
   };
 
+  private gotoPrevComponentBreadcrumb = () => {
+    if (this.componentChainIndex >= this.componentChain.length - 1) return;
+    this.componentBreadcrumbIndexByChain[this.componentChainIndex] =
+      this.breadcrumbIndex;
+    this.componentBreadcrumbsByChain[this.componentChainIndex] =
+      this.breadcrumb;
+    this.componentChainIndex += 1;
+    void this.rebuildBreadcrumbForComponent();
+  };
+
+  private gotoNextComponentBreadcrumb = () => {
+    if (this.componentChainIndex <= 0) return;
+    this.componentBreadcrumbIndexByChain[this.componentChainIndex] =
+      this.breadcrumbIndex;
+    this.componentBreadcrumbsByChain[this.componentChainIndex] =
+      this.breadcrumb;
+    this.componentChainIndex -= 1;
+    void this.rebuildBreadcrumbForComponent();
+  };
+
+  private rebuildBreadcrumbForComponent = async () => {
+    const componentInfo = this.componentChain[this.componentChainIndex];
+    const targetDom =
+      this.targetNode ||
+      this.breadcrumb[this.breadcrumb.length - 1]?.element ||
+      null;
+    if (!componentInfo || !targetDom) return;
+
+    const cachedBreadcrumb =
+      this.componentBreadcrumbsByChain[this.componentChainIndex];
+    if (cachedBreadcrumb && cachedBreadcrumb.length > 0) {
+      this.breadcrumb = cachedBreadcrumb;
+    } else {
+      this.breadcrumb = buildReactFiberBreadcrumb([], targetDom, componentInfo, {
+        getSourceInfo: (node) => this.getSourceInfo(node),
+        getValidNodeList: (nodes) => this.getValidNodeList(nodes),
+        elementPath: this.getSourceInfo(targetDom)?.path,
+        targetNode: this.targetNode,
+      });
+      this.componentBreadcrumbsByChain[this.componentChainIndex] =
+        this.breadcrumb;
+    }
+    const cachedIndex =
+      this.componentBreadcrumbIndexByChain[this.componentChainIndex];
+    if (typeof cachedIndex === 'number') {
+      this.breadcrumbIndex = Math.min(
+        Math.max(cachedIndex, 0),
+        Math.max(0, this.breadcrumb.length - 1)
+      );
+    } else {
+      this.breadcrumbIndex = Math.max(0, this.breadcrumb.length - 1);
+    }
+    await this.updateComplete;
+    this.scrollActiveBreadcrumbIntoView();
+  };
+
   private cancelAgent = () => {
     if (this.agentAbortController) {
       this.agentAbortController.abort();
       this.agentAbortController = null;
     }
     this.agentLoading = false;
+  };
+
+  private nextAgentEventId = () => {
+    this.agentEventId += 1;
+    return String(this.agentEventId);
+  };
+
+  private resetAgentStream = () => {
+    this.agentEvents = [];
+    this.agentError = '';
+    this.agentEventId = 0;
+    this.agentToolCallDrafts = {};
+  };
+
+  private scrollAgentLogToBottom = () => {
+    const log = this.agentLogRef;
+    if (!log) return;
+    const nearBottom =
+      log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    if (!nearBottom) return;
+    requestAnimationFrame(() => {
+      log.scrollTop = log.scrollHeight;
+    });
+  };
+
+  private truncateText = (text: string, maxLength = 2000) => {
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength)}...`;
+  };
+
+  private formatAgentValue = (value: unknown, maxLength = 2000) => {
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'string') {
+      return this.truncateText(value, maxLength);
+    }
+    try {
+      return this.truncateText(JSON.stringify(value, null, 2), maxLength);
+    } catch {
+      return this.truncateText(String(value), maxLength);
+    }
+  };
+
+  private formatBytes = (value?: number) => {
+    if (!value || !Number.isFinite(value)) return '';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = value;
+    let idx = 0;
+    while (size >= 1024 && idx < units.length - 1) {
+      size /= 1024;
+      idx += 1;
+    }
+    const rounded = size >= 10 || idx === 0 ? Math.round(size) : Math.round(size * 10) / 10;
+    return `${rounded} ${units[idx]}`;
+  };
+
+  private formatAgentFileSummary = (file: any): AgentFileSummary => {
+    const mediaType = String(file?.mediaType || 'application/octet-stream');
+    let size: number | undefined;
+    if (file?.uint8Array?.length) {
+      size = file.uint8Array.length;
+    } else if (typeof file?.base64 === 'string') {
+      size = Math.floor((file.base64.length * 3) / 4);
+    }
+    return {
+      mediaType,
+      size,
+      hasContent: Boolean(file?.uint8Array?.length || file?.base64),
+    };
+  };
+
+  private tryParseJsonString = (value: unknown) => {
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    if (!trimmed) return value;
+    if (!/^[\[{]/.test(trimmed)) return value;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return value;
+    }
+  };
+
+  private getAgentHostLabel = (url?: string) => {
+    if (!url) return '';
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return '';
+    }
+  };
+
+  private formatPathLabel = (value?: string) => {
+    if (!value) return '';
+    const safe = value.replace(/\\/g, '/');
+    const parts = safe.split('/').filter(Boolean);
+    if (parts.length <= 2) return parts.join('/');
+    return parts.slice(-2).join('/');
+  };
+
+  private describeToolCall = (raw: unknown): AgentActivityItem => {
+    const payload = this.tryParseJsonString(raw) as any;
+    const toolName = payload?.toolName || payload?.name || '';
+    const args = payload?.args || payload?.input?.args || payload?.input || {};
+    const parsedCmd = Array.isArray(args?.parsed_cmd) ? args.parsed_cmd : [];
+    const cmd = parsedCmd[0] || {};
+    const path = cmd?.path || cmd?.name || args?.path || args?.file || '';
+    const shortPath = this.formatPathLabel(path);
+    if (cmd?.type === 'read' || /^read /i.test(toolName)) {
+      return {
+        id: payload?.toolCallId || '',
+        kind: 'read',
+        label: `读取 ${shortPath || toolName.replace(/^read /i, '')}`.trim(),
+        filePath: path,
+        status: 'pending',
+      };
+    }
+    if (cmd?.type === 'list_files' || /^list /i.test(toolName)) {
+      return {
+        id: payload?.toolCallId || '',
+        kind: 'list',
+        label: shortPath
+          ? `列出 ${shortPath} 下的文件`
+          : `列出文件`,
+        filePath: path,
+        status: 'pending',
+      };
+    }
+    if (cmd?.type === 'search' || /^search /i.test(toolName)) {
+      const query = cmd?.query || args?.query || '';
+      const target = shortPath ? `于 ${shortPath}` : '';
+      return {
+        id: payload?.toolCallId || '',
+        kind: 'search',
+        label: query ? `搜索 "${query}" ${target}` : `搜索内容 ${target}`,
+        filePath: path,
+        status: 'pending',
+      };
+    }
+    if (
+      cmd?.type === 'edit' ||
+      cmd?.type === 'update' ||
+      /^edit /i.test(toolName)
+    ) {
+      return {
+        id: payload?.toolCallId || '',
+        kind: 'edit',
+        label: `编辑 ${shortPath || toolName.replace(/^edit /i, '')}`.trim(),
+        filePath: path,
+        status: 'pending',
+      };
+    }
+    return {
+      id: payload?.toolCallId || '',
+      kind: 'tool',
+      label: toolName ? `调用 ${toolName}` : '调用工具',
+      status: 'pending',
+    };
+  };
+
+  private countDiffLines = (diff?: string) => {
+    if (!diff) return null;
+    let added = 0;
+    let removed = 0;
+    diff.split('\n').forEach((line) => {
+      if (line.startsWith('+++') || line.startsWith('---')) return;
+      if (line.startsWith('+')) added += 1;
+      if (line.startsWith('-')) removed += 1;
+    });
+    return { added, removed };
+  };
+
+  private describeToolResult = (raw: unknown) => {
+    const payload = this.tryParseJsonString(raw) as any;
+    if (payload?.changes && typeof payload.changes === 'object') {
+      const filePath = Object.keys(payload.changes)[0];
+      const change = payload.changes[filePath] || {};
+      const diff = this.countDiffLines(change?.unified_diff);
+      const detail =
+        diff && (diff.added || diff.removed)
+          ? `+${diff.added} -${diff.removed}`
+          : '';
+      return {
+        kind: 'edit' as AgentActivityKind,
+        filePath,
+        detail,
+      };
+    }
+    const text =
+      payload?.stdout ||
+      payload?.aggregated_output ||
+      payload?.formatted_output ||
+      payload?.output ||
+      '';
+    if (typeof text === 'string' && text.trim()) {
+      const lines = text.trim().split(/\r?\n/).length;
+      return {
+        detail: `输出 ${lines} 行`,
+      };
+    }
+    return {};
+  };
+
+  private getToolCallMeta = (raw: unknown) => {
+    const payload = this.tryParseJsonString(raw) as any;
+    const item = this.describeToolCall(raw);
+    const args = payload?.args || payload?.input?.args || payload?.input || {};
+    const parsedCmd = Array.isArray(args?.parsed_cmd) ? args.parsed_cmd : [];
+    const cmd = parsedCmd[0] || {};
+    const command = Array.isArray(args?.command)
+      ? args.command.join(' ')
+      : args?.command || '';
+    const cwd = args?.cwd || '';
+    const query = cmd?.query || args?.query || '';
+    const path = cmd?.path || cmd?.name || args?.path || args?.file || '';
+    return {
+      item,
+      toolName: payload?.toolName || payload?.name || '',
+      command,
+      cwd,
+      query,
+      path,
+    };
+  };
+
+  private getToolResultMeta = (raw: unknown) => {
+    const payload = this.tryParseJsonString(raw) as any;
+    const info = this.describeToolResult(raw);
+    const stderr = payload?.stderr || payload?.error || '';
+    const exitCode = payload?.exit_code;
+    const status =
+      exitCode === undefined || exitCode === 0 ? 'success' : 'error';
+    const detail = info.detail;
+    return { info, stderr, status, detail };
+  };
+
+  private extractOutputText = (payload: any) => {
+    if (!payload) return '';
+    const text =
+      payload?.stdout ||
+      payload?.aggregated_output ||
+      payload?.formatted_output ||
+      payload?.output ||
+      '';
+    return typeof text === 'string' ? text : '';
+  };
+
+  private extractDiffPreview = (diff: string, maxLines = 8) => {
+    if (!diff) return [];
+    const lines = diff
+      .split('\n')
+      .filter(
+        (line) =>
+          line.startsWith('@@') ||
+          (line.startsWith('+') && !line.startsWith('+++')) ||
+          (line.startsWith('-') && !line.startsWith('---'))
+      );
+    return lines.slice(0, maxLines);
+  };
+
+  private extractOutputPreview = (text: string, maxLines = 8) => {
+    const ignore = ['Operation not permitted', 'shellenv.sh'];
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter((line) => line.trim().length > 0)
+      .filter((line) => !ignore.some((token) => line.includes(token)));
+    if (lines.length === 0) return { lines: [] as string[] };
+    const shortLines = lines.filter((line) => line.length <= 40);
+    if (shortLines.length >= Math.min(lines.length, 6)) {
+      return {
+        lines: [],
+        chips: lines.slice(0, maxLines),
+      };
+    }
+    return { lines: lines.slice(0, maxLines) };
+  };
+
+  private buildToolResultPreview = (
+    callMeta: ReturnType<typeof this.getToolCallMeta> | null,
+    raw: unknown
+  ) => {
+    const payload = this.tryParseJsonString(raw) as any;
+    if (!payload) return null;
+    if (payload?.changes && typeof payload.changes === 'object') {
+      const filePath = Object.keys(payload.changes)[0];
+      const change = payload.changes[filePath] || {};
+      const diffLines = this.extractDiffPreview(change?.unified_diff || '');
+      return {
+        title: filePath
+          ? `已编辑 ${this.formatPathLabel(filePath)}`
+          : '已编辑文件',
+        lines: diffLines,
+      };
+    }
+    const outputText = this.extractOutputText(payload);
+    if (outputText) {
+      const preview = this.extractOutputPreview(outputText);
+      const labelMap: Record<string, string> = {
+        read: '读取结果',
+        list: '文件列表',
+        search: '搜索结果',
+      };
+      const title = labelMap[callMeta?.item?.kind || ''] || '输出预览';
+      return {
+        title,
+        lines: preview.lines,
+        chips: preview.chips,
+      };
+    }
+    return null;
+  };
+
+  private collectChangedFiles = () => {
+    const items: Array<{ path: string; label: string; detail?: string }> = [];
+    const seen = new Set<string>();
+    for (const event of this.agentEvents) {
+      if (event.type !== 'tool-result') continue;
+      const payload = this.tryParseJsonString(
+        event.outputRaw ?? event.output
+      ) as any;
+      if (!payload?.changes || typeof payload.changes !== 'object') continue;
+      for (const filePath of Object.keys(payload.changes)) {
+        if (seen.has(filePath)) continue;
+        const change = payload.changes[filePath] || {};
+        const diff = this.countDiffLines(change?.unified_diff);
+        const detail =
+          diff && (diff.added || diff.removed)
+            ? `+${diff.added} -${diff.removed}`
+            : '';
+        items.push({
+          path: filePath,
+          label: this.formatPathLabel(filePath) || filePath,
+          detail,
+        });
+        seen.add(filePath);
+      }
+    }
+    return items;
+  };
+
+  private splitParagraphs = (text: string) => {
+    return text
+      .split(/\n{2,}/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+  };
+
+  private buildTimelineBlocks = (): AgentTimelineBlock[] => {
+    const blocks: AgentTimelineBlock[] = [];
+    const allowed: Array<AgentStreamEventType> = [
+      'text',
+      'reasoning',
+      'tool-call',
+      'tool-result',
+      'source',
+      'file',
+      'error',
+    ];
+    const toolBlocks = new Map<string, AgentTimelineBlock>();
+    for (const event of this.agentEvents) {
+      if (!allowed.includes(event.type)) continue;
+      if (event.type === 'tool-call' || event.type === 'tool-result') {
+        const id = event.toolCallId || event.id;
+        const existing = toolBlocks.get(id);
+        if (existing) {
+          existing.events.push(event);
+          if (event.type === 'tool-call') existing.call = event;
+          if (event.type === 'tool-result') existing.result = event;
+        } else {
+          const block: AgentTimelineBlock = {
+            kind: 'tool',
+            events: [event],
+            call: event.type === 'tool-call' ? event : undefined,
+            result: event.type === 'tool-result' ? event : undefined,
+          };
+          blocks.push(block);
+          toolBlocks.set(id, block);
+        }
+        continue;
+      }
+      const kind = event.type as AgentTimelineBlock['kind'];
+      const last = blocks[blocks.length - 1];
+      if (last && last.kind === kind) {
+        if (kind === 'text' || kind === 'reasoning') {
+          last.text = `${last.text || ''}${event.text || ''}`;
+        } else {
+          last.events.push(event);
+        }
+      } else {
+        blocks.push({
+          kind,
+          text:
+            kind === 'text' || kind === 'reasoning' ? event.text || '' : '',
+          events: [event],
+        });
+      }
+    }
+    return blocks;
+  };
+
+  private addAgentEvent = (event: AgentStreamEvent) => {
+    this.agentEvents = [...this.agentEvents, event];
+    this.scrollAgentLogToBottom();
+  };
+
+  private updateAgentEvent = (index: number, updates: Partial<AgentStreamEvent>) => {
+    const next = this.agentEvents.slice();
+    const current = next[index];
+    if (!current) return;
+    next[index] = { ...current, ...updates };
+    this.agentEvents = next;
+    this.scrollAgentLogToBottom();
+  };
+
+  private appendAgentText = (type: 'text' | 'reasoning', text: string) => {
+    if (!text) return;
+    const lastIndex = this.agentEvents.length - 1;
+    const last = this.agentEvents[lastIndex];
+    if (last && last.type === type) {
+      this.updateAgentEvent(lastIndex, {
+        text: `${last.text || ''}${text}`,
+      });
+      return;
+    }
+    this.addAgentEvent({ id: this.nextAgentEventId(), type, text });
+  };
+
+  private replaceAgentPlainText = (text: string) => {
+    if (this.agentEvents.length === 1 && this.agentEvents[0].type === 'text') {
+      this.updateAgentEvent(0, { text });
+      return;
+    }
+    this.agentEvents = [{ id: this.nextAgentEventId(), type: 'text', text }];
+    this.scrollAgentLogToBottom();
+  };
+
+  private startToolCall = (toolCallId?: string, toolName?: string) => {
+    const event: AgentStreamEvent = {
+      id: this.nextAgentEventId(),
+      type: 'tool-call',
+      toolCallId,
+      toolName,
+      input: '',
+    };
+    const index = this.agentEvents.length;
+    this.agentEvents = [...this.agentEvents, event];
+    if (toolCallId) {
+      this.agentToolCallDrafts[toolCallId] = {
+        index,
+        argsText: '',
+        toolName,
+      };
+    }
+    this.scrollAgentLogToBottom();
+  };
+
+  private appendToolCallDelta = (
+    toolCallId?: string,
+    toolName?: string,
+    delta?: string
+  ) => {
+    if (!delta) return;
+    if (!toolCallId) {
+      this.addAgentEvent({
+        id: this.nextAgentEventId(),
+        type: 'tool-call',
+        toolName,
+        input: delta,
+      });
+      return;
+    }
+    let draft = this.agentToolCallDrafts[toolCallId];
+    if (!draft) {
+      this.startToolCall(toolCallId, toolName);
+      draft = this.agentToolCallDrafts[toolCallId];
+    }
+    if (!draft) return;
+    draft.argsText += delta;
+    this.updateAgentEvent(draft.index, {
+      toolCallId,
+      toolName: toolName || draft.toolName,
+      input: draft.argsText,
+    });
+  };
+
+  private finalizeToolCall = (
+    toolCallId?: string,
+    toolName?: string,
+    input?: unknown
+  ) => {
+    const inputText = this.formatAgentValue(input, 4000);
+    if (toolCallId && this.agentToolCallDrafts[toolCallId]) {
+      const { index } = this.agentToolCallDrafts[toolCallId];
+      this.updateAgentEvent(index, {
+        toolCallId,
+        toolName,
+        input: inputText || this.agentEvents[index]?.input,
+        inputRaw: input,
+      });
+      delete this.agentToolCallDrafts[toolCallId];
+      return;
+    }
+    this.addAgentEvent({
+      id: this.nextAgentEventId(),
+      type: 'tool-call',
+      toolCallId,
+      toolName,
+      input: inputText,
+      inputRaw: input,
+    });
+  };
+
+  private addToolResult = (
+    toolCallId?: string,
+    toolName?: string,
+    input?: unknown,
+    output?: unknown
+  ) => {
+    const inputText = this.formatAgentValue(input, 2000);
+    const outputText = this.formatAgentValue(output, 4000);
+    this.addAgentEvent({
+      id: this.nextAgentEventId(),
+      type: 'tool-result',
+      toolCallId,
+      toolName,
+      input: inputText,
+      output: outputText,
+      inputRaw: input,
+      outputRaw: output,
+    });
+  };
+
+  private addSourceEvent = (part: any) => {
+    this.addAgentEvent({
+      id: this.nextAgentEventId(),
+      type: 'source',
+      source: {
+        id: part.id,
+        url: part.url,
+        title: part.title,
+        sourceType: part.sourceType,
+      },
+    });
+  };
+
+  private addFileEvent = (part: any) => {
+    const file = part?.file || part;
+    this.addAgentEvent({
+      id: this.nextAgentEventId(),
+      type: 'file',
+      file: this.formatAgentFileSummary(file),
+    });
+  };
+
+  private addErrorEvent = (message: string) => {
+    this.addAgentEvent({
+      id: this.nextAgentEventId(),
+      type: 'error',
+      message,
+    });
+  };
+
+  private consumeAgentPart = (part: any) => {
+    if (part === null || part === undefined) return;
+    if (typeof part === 'string') {
+      this.appendAgentText('text', part);
+      return;
+    }
+    const type = part.type;
+    if (!type) {
+      if (part.delta) {
+        this.appendAgentText('text', String(part.delta));
+        return;
+      }
+      if (part.text) {
+        this.appendAgentText('text', String(part.text));
+        return;
+      }
+      this.addAgentEvent({
+        id: this.nextAgentEventId(),
+        type: 'unknown',
+        text: this.formatAgentValue(part),
+      });
+      return;
+    }
+    switch (type) {
+      case 'text':
+        this.appendAgentText('text', String(part.text || ''));
+        break;
+      case 'reasoning':
+        this.appendAgentText('reasoning', String(part.text || ''));
+        break;
+      case 'text-delta':
+        this.appendAgentText(
+          'text',
+          String(part.text ?? part.delta ?? '')
+        );
+        break;
+      case 'reasoning-delta':
+        this.appendAgentText(
+          'reasoning',
+          String(part.delta ?? part.text ?? '')
+        );
+        break;
+      case 'tool-call-streaming-start':
+        this.startToolCall(part.toolCallId, part.toolName);
+        break;
+      case 'tool-call-delta':
+        this.appendToolCallDelta(
+          part.toolCallId,
+          part.toolName,
+          String(part.argsTextDelta ?? part.delta ?? '')
+        );
+        break;
+      case 'tool-call':
+        this.finalizeToolCall(
+          part.toolCallId,
+          part.toolName,
+          part.input ?? part.args ?? part.parameters ?? part.arguments
+        );
+        break;
+      case 'tool-result':
+        this.addToolResult(
+          part.toolCallId,
+          part.toolName,
+          part.input ?? part.args ?? part.parameters,
+          part.output ?? part.result
+        );
+        break;
+      case 'source':
+        this.addSourceEvent(part);
+        break;
+      case 'file':
+        this.addFileEvent(part);
+        break;
+      case 'start-step':
+      case 'finish-step':
+        // skip noisy metadata events
+        break;
+      case 'error': {
+        const message = String(part.message ?? part.error ?? 'error');
+        this.agentError = message;
+        this.addErrorEvent(message);
+        break;
+      }
+      default:
+        // skip unknown events for readability
+        break;
+    }
+  };
+
+  private syncAgentUiDefaults = () => {
+    const providers = this.agentUi?.providers || [];
+    const modes = this.agentUi?.modes || [];
+    if (!providers.length) {
+      this.agentProvider = '';
+    } else if (!this.agentProvider) {
+      this.agentProvider =
+        this.agentUi?.defaultProvider || providers[0].value;
+    }
+    if (!modes.length) {
+      this.agentMode = '';
+    } else if (!this.agentMode) {
+      this.agentMode = this.agentUi?.defaultMode || modes[0].value;
+    }
+  };
+
+  private formatAgentFileSize = (bytes: number) => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '';
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
+  };
+
+  private estimatePayloadSize = (bytes: number) => {
+    return Math.ceil(bytes * 1.37);
+  };
+
+  private readFileAsDataUrl = (file: File) => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('read failed'));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  private readFileAsText = (file: File) => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('read failed'));
+      reader.readAsText(file);
+    });
+  };
+
+  private handleAgentAttachClick = () => {
+    if (this.agentLoading) return;
+    this.agentFileInputRef?.click();
+  };
+
+  private handleAgentFilesSelected = async (event: Event) => {
+    const input = event.target as HTMLInputElement;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (!files.length) return;
+
+    const maxFiles = this.agentUi?.maxFiles ?? 6;
+    const maxFileSize = this.agentUi?.maxFileSize ?? 2 * 1024 * 1024;
+    const maxTotalSize = this.agentUi?.maxTotalSize ?? 8 * 1024 * 1024;
+    const currentEstimated = this.agentFiles.reduce(
+      (sum, file) => sum + this.estimatePayloadSize(file.size),
+      0
+    );
+
+    let estimatedTotal = currentEstimated;
+    const nextFiles: AgentAttachment[] = [];
+    for (const file of files) {
+      if (this.agentFiles.length + nextFiles.length >= maxFiles) {
+        this.showNotification(`最多上传 ${maxFiles} 个附件`, 'error');
+        break;
+      }
+      if (file.size > maxFileSize) {
+        this.showNotification(
+          `${file.name} 超过大小限制（${this.formatAgentFileSize(
+            maxFileSize
+          )}）`,
+          'error'
+        );
+        continue;
+      }
+      const estimatedSize = this.estimatePayloadSize(file.size);
+      if (estimatedTotal + estimatedSize > maxTotalSize) {
+        this.showNotification(
+          `附件总大小超过限制（${this.formatAgentFileSize(
+            maxTotalSize
+          )}）`,
+          'error'
+        );
+        break;
+      }
+      estimatedTotal += estimatedSize;
+
+      const isImage = file.type.startsWith('image/');
+      const isText =
+        file.type.startsWith('text/') ||
+        /\.(md|txt|json|yaml|yml|csv|log|ini|conf|ts|tsx|js|jsx|css|scss|less)$/i.test(
+          file.name
+        );
+      try {
+        let text: string | undefined;
+        let dataUrl: string | undefined;
+        if (isText && !isImage) {
+          text = await this.readFileAsText(file);
+          const maxTextChars = 20000;
+          if (text.length > maxTextChars) {
+            text = `${text.slice(0, maxTextChars)}…(已截断)`;
+          }
+        } else {
+          dataUrl = await this.readFileAsDataUrl(file);
+        }
+        nextFiles.push({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          isImage,
+          dataUrl,
+          text,
+        });
+      } catch (error) {
+        this.showNotification(`${file.name} 读取失败`, 'error');
+      }
+    }
+
+    if (nextFiles.length) {
+      this.agentFiles = [...this.agentFiles, ...nextFiles];
+    }
+  };
+
+  private removeAgentFile = (id: string) => {
+    this.agentFiles = this.agentFiles.filter((file) => file.id !== id);
+  };
+
+  private buildAgentFilesPayload = () => {
+    if (!this.agentFiles.length) return [];
+    return this.agentFiles.map((file) => ({
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      isImage: file.isImage,
+      text: file.text,
+      dataUrl: file.dataUrl,
+    }));
+  };
+
+  private getAgentOptionLabel = (
+    options: AgentUiOption[] = [],
+    value: string
+  ) => {
+    if (!options.length) return null;
+    return options.find((option) => option.value === value) || options[0];
+  };
+
+  private toggleAgentMenu = (target: 'provider' | 'mode') => {
+    if (target === 'provider') {
+      this.agentProviderOpen = !this.agentProviderOpen;
+      this.agentModeOpen = false;
+    } else {
+      this.agentModeOpen = !this.agentModeOpen;
+      this.agentProviderOpen = false;
+    }
+  };
+
+  private selectAgentOption = (
+    target: 'provider' | 'mode',
+    option: AgentUiOption
+  ) => {
+    if (option.disabled) return;
+    if (target === 'provider') {
+      this.agentProvider = option.value;
+      this.agentProviderOpen = false;
+    } else {
+      this.agentMode = option.value;
+      this.agentModeOpen = false;
+    }
   };
 
   private buildClientContextPrompt = () => {
@@ -1370,16 +2309,17 @@ export class CodeInspectorComponent extends LitElement {
   };
 
   private submitAgent = async () => {
-    const requirement = this.requirement.trim();
-    if (!requirement || this.agentLoading) return;
+    let requirement = this.requirement.trim();
+    const filesPayload = this.buildAgentFilesPayload();
+    if ((!requirement && !filesPayload.length) || this.agentLoading) return;
+    if (!requirement && filesPayload.length) {
+      requirement = '请参考附件';
+    }
 
     this.agentLoading = true;
-    this.agentError = '';
-    this.agentOutput = '';
-    this.agentReasoning = '';
-    this.agentActions = '';
-    this.agentTrace = '';
-    this.agentTraceType = '';
+    this.agentProviderOpen = false;
+    this.agentModeOpen = false;
+    this.resetAgentStream();
 
     const controller = new AbortController();
     this.agentAbortController = controller;
@@ -1394,6 +2334,9 @@ export class CodeInspectorComponent extends LitElement {
       elementName: this.element.name,
       dom,
       domPath,
+      model: this.agentProvider || undefined,
+      mode: this.agentMode || undefined,
+      files: filesPayload.length ? filesPayload : undefined,
     };
 
     try {
@@ -1455,46 +2398,9 @@ export class CodeInspectorComponent extends LitElement {
             }
             try {
               const parsed = JSON.parse(data);
-              const type = parsed?.type;
-              if (!type && parsed?.delta) {
-                this.agentOutput += String(parsed.delta);
-                continue;
-              }
-              if (type === 'text-delta') {
-                this.agentOutput += String(parsed.delta || '');
-                if (this.agentTraceType !== 'text') {
-                  this.agentTrace += '\n[assistant]\n';
-                  this.agentTraceType = 'text';
-                }
-                this.agentTrace += String(parsed.delta || '');
-              } else if (type === 'reasoning-delta') {
-                this.agentReasoning += String(parsed.delta || '');
-                if (this.agentTraceType !== 'reasoning') {
-                  this.agentTrace += '\n[reasoning]\n';
-                  this.agentTraceType = 'reasoning';
-                }
-                this.agentTrace += String(parsed.delta || '');
-              } else if (type === 'tool-call') {
-                const name = parsed.toolName || 'tool';
-                const args = parsed.args ? JSON.stringify(parsed.args) : '';
-                this.agentActions += `\n> 调用 ${name} ${args}\n`;
-                this.agentTraceType = '';
-                this.agentTrace += `\n[tool-call] ${name} ${args}\n`;
-              } else if (type === 'tool-result') {
-                const name = parsed.toolName || 'tool';
-                const result = parsed.result
-                  ? JSON.stringify(parsed.result)
-                  : '';
-                this.agentActions += `> 结果 ${name} ${result}\n`;
-                this.agentTraceType = '';
-                this.agentTrace += `\n[tool-result] ${name} ${result}\n`;
-              } else if (type === 'error') {
-                this.agentError = String(parsed.message || 'error');
-                this.agentTraceType = '';
-                this.agentTrace += `\n[error] ${String(parsed.message || '')}\n`;
-              }
+              this.consumeAgentPart(parsed);
             } catch {
-              this.agentOutput += data;
+              this.consumeAgentPart(data);
             }
           }
           index = buffer.indexOf('\n\n');
@@ -1517,7 +2423,7 @@ export class CodeInspectorComponent extends LitElement {
         if (isSse) {
           processSseText(delta);
         } else {
-          this.agentOutput = text;
+          this.replaceAgentPlainText(text);
         }
       };
 
@@ -1534,7 +2440,9 @@ export class CodeInspectorComponent extends LitElement {
       xhr.onload = () => {
         controller.signal.removeEventListener('abort', abortHandler);
         if (xhr.status >= 200 && xhr.status < 300) {
-          this.agentOutput = xhr.responseText || this.agentOutput;
+          if (!isSse) {
+            this.replaceAgentPlainText(xhr.responseText || '');
+          }
           resolve();
         } else {
           reject(
@@ -1738,12 +2646,27 @@ export class CodeInspectorComponent extends LitElement {
       window.removeEventListener(event, handler, options as EventListenerOptions);
     });
   }
+  
+  protected updated(changedProps: Map<PropertyKey, unknown>): void {
+    if (changedProps.has('agentUi')) {
+      this.syncAgentUiDefaults();
+    }
+    if (
+      changedProps.has('agentEvents') ||
+      changedProps.has('chatOpen') ||
+      changedProps.has('show') ||
+      changedProps.has('showNodeTree')
+    ) {
+      this.scheduleElementInfoReposition();
+    }
+  }
 
   protected firstUpdated(): void {
     // 初始化内部状态
     this.internalLocate = this.locate;
     this.internalCopy = !!this.copy;
     this.internalTarget = !!this.target;
+    this.syncAgentUiDefaults();
 
     // Initialize event listeners configuration
     this.eventListeners = [
@@ -1771,8 +2694,22 @@ export class CodeInspectorComponent extends LitElement {
   }
 
   disconnectedCallback(): void {
-    // Detach all event listeners
-    this.detachEventListeners();
+    window.removeEventListener('mousemove', this.handleMouseMove, true);
+    window.removeEventListener('touchmove', this.handleMouseMove, true);
+    window.removeEventListener('mousemove', this.handleDrag, true);
+    window.removeEventListener('touchmove', this.handleDrag, true);
+    window.removeEventListener('click', this.handleMouseClick, true);
+    window.removeEventListener('pointerdown', this.handlePointerDown, true);
+    window.removeEventListener('keyup', this.handleKeyUp, true);
+    window.removeEventListener('keydown', this.handleModeShortcut, true);
+    window.removeEventListener('mouseleave', this.removeCover, true);
+    window.removeEventListener('mouseup', this.handleMouseUp, true);
+    window.removeEventListener('touchend', this.handleMouseUp, true);
+    window.removeEventListener('contextmenu', this.handleContextMenu, true);
+    window.removeEventListener('wheel', this.handleWheel, { passive: false } as EventListenerOptions);
+    window.removeEventListener('resize', this.handleViewportChange, true);
+    window.removeEventListener('scroll', this.handleViewportChange, true);
+    this.elementInfoResizeObserver?.disconnect();
   }
 
   renderNodeTree = (node: TreeNode): TemplateResult => html`
@@ -1790,6 +2727,269 @@ export class CodeInspectorComponent extends LitElement {
   `;
 
   render() {
+    const timelineBlocks = this.buildTimelineBlocks();
+    const firstTextIndex = timelineBlocks.findIndex(
+      (block) => block.kind === 'text'
+    );
+    const cotBlocks =
+      firstTextIndex === -1
+        ? timelineBlocks
+        : timelineBlocks.slice(0, firstTextIndex);
+    const responseBlocks =
+      firstTextIndex === -1 ? [] : timelineBlocks.slice(firstTextIndex);
+    const hasResponse = firstTextIndex !== -1;
+    const changedFiles = this.collectChangedFiles();
+    const showLog = timelineBlocks.length > 0;
+
+    const changedFilesBlock = changedFiles.length
+      ? html`<div class="ci-agent-block ci-agent-block-changes">
+          <div class="ci-agent-block-header">
+            <span class="ci-agent-dot"></span>
+            <span class="ci-agent-block-title">Changed Files</span>
+            <span class="ci-agent-pill ci-agent-pill-muted"
+              >${changedFiles.length} 个</span
+            >
+          </div>
+          <ul class="ci-agent-block-list">
+            ${changedFiles.map(
+              (item) => html`<li class="ci-agent-block-item">
+                <span class="ci-agent-pill">${item.label}</span>
+                ${item.detail
+                  ? html`<span class="ci-agent-pill ci-agent-pill-muted"
+                      >${item.detail}</span
+                    >`
+                  : ''}
+              </li>`
+            )}
+          </ul>
+        </div>`
+      : '';
+
+    const renderTimelineBlock = (
+      block: AgentTimelineBlock,
+      isCot: boolean
+    ) => {
+      if (block.kind === 'text') {
+        const text = (block.text || '').trim();
+        if (!text) return '';
+        return html`<div class="ci-agent-block ci-agent-block-text">
+          <div class="ci-agent-block-header">
+            <span class="ci-agent-dot"></span>
+            <span class="ci-agent-block-title">Response</span>
+          </div>
+          <div class="ci-agent-block-body">
+            ${this.splitParagraphs(text).map((part) => html`<p>${part}</p>`)}
+          </div>
+        </div>`;
+      }
+      if (block.kind === 'reasoning') {
+        const text = (block.text || '').trim();
+        if (!text) return '';
+        return html`<div class="ci-agent-block ci-agent-block-reasoning">
+          <div class="ci-agent-block-header">
+            <span class="ci-agent-dot"></span>
+            <span class="ci-agent-block-title">Reasoning</span>
+          </div>
+          ${isCot
+            ? html`<div class="ci-agent-block-body">
+                ${this.splitParagraphs(text).map((part) => html`<p>${part}</p>`)}
+              </div>`
+            : html`<details class="ci-agent-details" open>
+                <summary>Thoughts</summary>
+                <div class="ci-agent-block-body">
+                  ${this.splitParagraphs(text).map(
+                    (part) => html`<p>${part}</p>`
+                  )}
+                </div>
+              </details>`}
+        </div>`;
+      }
+      if (block.kind === 'tool') {
+        const callMeta = block.call
+          ? this.getToolCallMeta(block.call.inputRaw ?? block.call.input)
+          : null;
+        const resultMeta = block.result
+          ? this.getToolResultMeta(
+              block.result.outputRaw ?? block.result.output
+            )
+          : null;
+        const preview = block.result
+          ? this.buildToolResultPreview(
+              callMeta,
+              block.result.outputRaw ?? block.result.output
+            )
+          : null;
+        const label =
+          callMeta?.item?.label ||
+          block.call?.toolName ||
+          block.result?.toolName ||
+          '工具调用';
+        const statusLabel = resultMeta
+          ? resultMeta.status === 'success'
+            ? '完成'
+            : '失败'
+          : '运行中';
+        return html`<div class="ci-agent-block ci-agent-block-tool">
+          <div class="ci-agent-block-header">
+            <span class="ci-agent-dot"></span>
+            <span class="ci-agent-block-title">Tool</span>
+            <span class="ci-agent-pill">${label}</span>
+            <span class="ci-agent-pill ci-agent-pill-muted">${statusLabel}</span>
+            ${resultMeta?.detail
+              ? html`<span class="ci-agent-pill ci-agent-pill-muted"
+                  >${resultMeta.detail}</span
+                >`
+              : ''}
+          </div>
+          <details class="ci-agent-details">
+            <summary>
+              <span>收起/展开</span>
+              ${callMeta?.item?.label
+                ? html`<span class="ci-agent-details-preview"
+                    >${callMeta.item.label}</span
+                  >`
+                : ''}
+            </summary>
+            <div class="ci-agent-meta-list">
+              ${callMeta?.toolName
+                ? html`<span class="ci-agent-meta-key">Tool</span
+                  ><span class="ci-agent-meta-value"
+                    >${callMeta.toolName}</span
+                  >`
+                : ''}
+              ${callMeta?.path
+                ? html`<span class="ci-agent-meta-key">Path</span
+                  ><span class="ci-agent-meta-value"
+                    >${this.formatPathLabel(callMeta.path)}</span
+                  >`
+                : ''}
+              ${callMeta?.query
+                ? html`<span class="ci-agent-meta-key">Query</span
+                  ><span class="ci-agent-meta-value"
+                    >${callMeta.query}</span
+                  >`
+                : ''}
+              ${callMeta?.cwd
+                ? html`<span class="ci-agent-meta-key">Cwd</span
+                  ><span class="ci-agent-meta-value"
+                    >${this.formatPathLabel(callMeta.cwd)}</span
+                  >`
+                : ''}
+              ${resultMeta
+                ? html`<span class="ci-agent-meta-key">Result</span
+                  ><span class="ci-agent-meta-value"
+                    >${statusLabel}</span
+                  >`
+                : ''}
+              ${resultMeta?.detail
+                ? html`<span class="ci-agent-meta-key">Summary</span
+                  ><span class="ci-agent-meta-value"
+                    >${resultMeta.detail}</span
+                  >`
+                : ''}
+              ${resultMeta?.stderr
+                ? html`<span class="ci-agent-meta-key">Stderr</span
+                  ><span class="ci-agent-meta-value"
+                    >${this.truncateText(String(resultMeta.stderr), 120)}</span
+                  >`
+                : ''}
+            </div>
+            ${preview
+              ? html`<div class="ci-agent-preview">
+                  <div class="ci-agent-preview-title">${preview.title}</div>
+                  ${preview.chips
+                    ? html`<div class="ci-agent-chips">
+                        ${preview.chips.map(
+                          (chip) => html`<span class="ci-agent-chip"
+                            >${chip}</span
+                          >`
+                        )}
+                      </div>`
+                    : preview.lines && preview.lines.length
+                    ? html`<div class="ci-agent-preview-lines">
+                        ${preview.lines.map(
+                          (line) =>
+                            html`<div class="ci-agent-preview-line">${line}</div>`
+                        )}
+                      </div>`
+                    : html`<div class="ci-agent-preview-empty">
+                        无可展示内容
+                      </div>`}
+                </div>`
+              : ''}
+          </details>
+        </div>`;
+      }
+      if (block.kind === 'source') {
+        return html`<div class="ci-agent-block ci-agent-block-source">
+          <div class="ci-agent-block-header">
+            <span class="ci-agent-dot"></span>
+            <span class="ci-agent-block-title">Sources</span>
+          </div>
+          <div class="ci-agent-chips">
+            ${block.events.map((event) => {
+              const title =
+                event.source?.title || event.source?.url || 'source';
+              const host = this.getAgentHostLabel(event.source?.url);
+              return event.source?.url
+                ? html`<a
+                    class="ci-agent-chip"
+                    href="${event.source.url}"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    ${title}
+                    ${host
+                      ? html`<span class="ci-agent-chip-host">${host}</span>`
+                      : ''}
+                  </a>`
+                : html`<span class="ci-agent-chip">${title}</span>`;
+            })}
+          </div>
+        </div>`;
+      }
+      if (block.kind === 'file') {
+        return html`<div class="ci-agent-block ci-agent-block-file">
+          <div class="ci-agent-block-header">
+            <span class="ci-agent-dot"></span>
+            <span class="ci-agent-block-title">Files</span>
+          </div>
+          <div class="ci-agent-file-list">
+            ${block.events.map((event) => {
+              const mediaType =
+                event.file?.mediaType || 'application/octet-stream';
+              const sizeLabel = event.file?.size
+                ? this.formatBytes(event.file.size)
+                : '';
+              return html`<div class="ci-agent-file-item">
+                <div class="ci-agent-file-title">${mediaType}</div>
+                ${sizeLabel
+                  ? html`<div class="ci-agent-file-meta">${sizeLabel}</div>`
+                  : ''}
+              </div>`;
+            })}
+          </div>
+        </div>`;
+      }
+      if (block.kind === 'error') {
+        return html`<div class="ci-agent-block ci-agent-block-error">
+          <div class="ci-agent-block-header">
+            <span class="ci-agent-dot"></span>
+            <span class="ci-agent-block-title">Error</span>
+          </div>
+          <div class="ci-agent-block-body">
+            ${block.events.map(
+              (event) =>
+                html`<p class="ci-agent-content-error">
+                  ${event.message || 'error'}
+                </p>`
+            )}
+          </div>
+        </div>`;
+      }
+      return '';
+    };
+
     const containerPosition = {
       display: this.show ? 'block' : 'none',
       top: `${this.position.top - this.position.margin.top}px`,
@@ -1840,6 +3040,83 @@ export class CodeInspectorComponent extends LitElement {
       display: this.showNodeTree ? '' : 'none',
     };
 
+    const hasPrevComponent =
+      this.componentChainIndex < this.componentChain.length - 1;
+    const hasNextComponent = this.componentChainIndex > 0;
+    const agentUi = this.agentUi || {};
+    const providerOptions = agentUi.providers || [];
+    const modeOptions = agentUi.modes || [];
+    const activeProvider = this.getAgentOptionLabel(
+      providerOptions,
+      this.agentProvider
+    );
+    const activeMode = this.getAgentOptionLabel(
+      modeOptions,
+      this.agentMode
+    );
+    const canUpload = agentUi.enableUpload !== false;
+    const placeholder =
+      agentUi.placeholder || 'What would you like to know?';
+    const canSend =
+      !!(this.requirement.trim() || this.agentFiles.length) &&
+      !this.agentLoading;
+    const renderAgentIcon = (kind?: AgentUiOption['icon']) => {
+      if (kind === 'globe' || kind === 'search') {
+        return html`<svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5" />
+          <path
+            d="M3 12h18M12 3a14 14 0 0 0 0 18M12 3a14 14 0 0 1 0 18"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>`;
+      }
+      if (kind === 'model') {
+        return html`<svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M12 3l7 4v10l-7 4-7-4V7l7-4z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M12 7v10M5 9l7 4 7-4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>`;
+      }
+      return html`<svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.5" />
+        <path
+          d="M20 20l-3.5-3.5"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+        />
+      </svg>`;
+    };
+
     return html`
       <div
         class="code-inspector-container ${this.overlayMode === 'outline'
@@ -1888,7 +3165,8 @@ export class CodeInspectorComponent extends LitElement {
                                   : ''}"
                                 data-index="${part.index}"
                                 title="${part.node.path}:${part.node.line}:${part.node.column}"
-                                @click="${() => this.jumpBreadcrumb(part.index)}"
+                                @click="${(e: MouseEvent) =>
+                                  this.handleBreadcrumbClick(part.index, e)}"
                                 >${part.node.name}</span
                               >
                               ${i < arr.length - 1
@@ -1899,11 +3177,11 @@ export class CodeInspectorComponent extends LitElement {
                     </div>
                     <div class="ci-breadcrumb-controls">
                       <span
-                        class="ci-arrow ${this.breadcrumbIndex <= 0
+                        class="ci-arrow ci-arrow-up ${!hasPrevComponent
                           ? 'disabled'
                           : ''}"
-                        title="上一级"
-                        @click="${this.gotoParentBreadcrumb}"
+                        title="上一个组件"
+                        @click="${this.gotoPrevComponentBreadcrumb}"
                         >${html`<svg
                           width="12"
                           height="12"
@@ -1921,12 +3199,11 @@ export class CodeInspectorComponent extends LitElement {
                         </svg>`}</span
                       >
                       <span
-                        class="ci-arrow ${this.breadcrumbIndex >=
-                        this.breadcrumb.length - 1
+                        class="ci-arrow ci-arrow-down ${!hasNextComponent
                           ? 'disabled'
                           : ''}"
-                        title="下一级"
-                        @click="${this.gotoChildBreadcrumb}"
+                        title="下一个组件"
+                        @click="${this.gotoNextComponentBreadcrumb}"
                         >${html`<svg
                           width="12"
                           height="12"
@@ -1943,142 +3220,480 @@ export class CodeInspectorComponent extends LitElement {
                           />
                         </svg>`}</span
                       >
+                      <span
+                        class="ci-arrow ci-arrow-left ${this.breadcrumbIndex <= 0
+                          ? 'disabled'
+                          : ''}"
+                        title="上一层"
+                        @click="${this.gotoParentBreadcrumb}"
+                        >${html`<svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path
+                            d="M15 8l-4 4 4 4"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          />
+                        </svg>`}</span
+                      >
+                      <span
+                        class="ci-arrow ci-arrow-right ${this.breadcrumbIndex >=
+                        this.breadcrumb.length - 1
+                          ? 'disabled'
+                          : ''}"
+                        title="下一层"
+                        @click="${this.gotoChildBreadcrumb}"
+                        >${html`<svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path
+                            d="M9 8l4 4-4 4"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          />
+                        </svg>`}</span
+                      >
                     </div>
                   </div>
                   <div class="ci-agent">
-                    <textarea
-                      id="ci-agent-input"
-                      class="ci-agent-input"
-                      placeholder="描述你的修改需求，按 Ctrl/⌘ + Enter 发送"
-                      .value="${this.requirement}"
-                      @input="${(e: Event) => {
-                        this.requirement = (
-                          e.target as HTMLTextAreaElement
-                        ).value;
-                      }}"
-                      @keydown="${(e: KeyboardEvent) => {
-                        const isSubmit =
-                          (e.ctrlKey || e.metaKey) && e.key === 'Enter';
-                        if (isSubmit) {
-                          e.preventDefault();
-                          void this.submitAgent();
-                        }
-                      }}"
-                    ></textarea>
-                    <div class="ci-agent-footer">
-                      <div
-                        class="ci-agent-status ${this.agentError
-                          ? 'error'
-                          : ''}"
-                      >
-                        ${this.agentLoading
-                          ? '生成中…'
-                          : this.agentError || ''}
-                      </div>
-                      <div class="ci-agent-actions">
-                        ${this.agentLoading
-                          ? html`
-                              <span
-                                class="ci-action"
-                                title="取消"
-                                @click="${this.cancelAgent}"
-                                >${html`<svg
-                                  width="14"
-                                  height="14"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  xmlns="http://www.w3.org/2000/svg"
+                    <div class="ci-agent-box">
+                      <textarea
+                        id="ci-agent-input"
+                        class="ci-agent-input"
+                        placeholder="${placeholder}"
+                        .value="${this.requirement}"
+                        @input="${(e: Event) => {
+                          this.requirement = (
+                            e.target as HTMLTextAreaElement
+                          ).value;
+                        }}"
+                        @keydown="${(e: KeyboardEvent) => {
+                          const isSubmit =
+                            (e.ctrlKey || e.metaKey) && e.key === 'Enter';
+                          if (isSubmit) {
+                            e.preventDefault();
+                            void this.submitAgent();
+                          }
+                        }}"
+                      ></textarea>
+                      ${this.agentFiles.length
+                        ? html`<div class="ci-agent-attachments">
+                            ${this.agentFiles.map(
+                              (file) => html`
+                                <div class="ci-agent-attachment">
+                                  ${file.isImage && file.dataUrl
+                                    ? html`<img
+                                        class="ci-agent-attachment-thumb"
+                                        src="${file.dataUrl}"
+                                        alt="${file.name}"
+                                      />`
+                                    : html`<span class="ci-agent-attachment-icon"
+                                        >${html`<svg
+                                          width="14"
+                                          height="14"
+                                          viewBox="0 0 24 24"
+                                          fill="none"
+                                          xmlns="http://www.w3.org/2000/svg"
+                                        >
+                                          <path
+                                            d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z"
+                                            stroke="currentColor"
+                                            stroke-width="1.5"
+                                            stroke-linejoin="round"
+                                          />
+                                          <path
+                                            d="M14 3v6h6"
+                                            stroke="currentColor"
+                                            stroke-width="1.5"
+                                            stroke-linejoin="round"
+                                          />
+                                        </svg>`}</span
+                                      >`}
+                                  <div class="ci-agent-attachment-meta">
+                                    <span
+                                      class="ci-agent-attachment-name"
+                                      title="${file.name}"
+                                      >${file.name}</span
+                                    >
+                                    ${file.size
+                                      ? html`<span
+                                          class="ci-agent-attachment-size"
+                                          >${this.formatAgentFileSize(
+                                            file.size
+                                          )}</span
+                                        >`
+                                      : ''}
+                                  </div>
+                                  <button
+                                    class="ci-agent-attachment-remove"
+                                    title="移除"
+                                    @click="${() =>
+                                      this.removeAgentFile(file.id)}"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              `
+                            )}
+                          </div>`
+                        : ''}
+                      <div class="ci-agent-controls">
+                        <div class="ci-agent-controls-left">
+                          ${canUpload
+                            ? html`
+                                <button
+                                  class="ci-agent-icon-button"
+                                  title="上传图片/文件"
+                                  @click="${this.handleAgentAttachClick}"
                                 >
-                                  <path
-                                    d="M6 6l12 12M18 6L6 18"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                  />
-                                </svg>`}</span
-                              >
-                            `
-                          : html`
-                              <span
-                                class="ci-action ${this.requirement.trim()
-                                  ? ''
-                                  : 'disabled'}"
-                                title="发送"
-                                @click="${() => void this.submitAgent()}"
-                                >${html`<svg
-                                  width="14"
-                                  height="14"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  xmlns="http://www.w3.org/2000/svg"
+                                  ${html`<svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    xmlns="http://www.w3.org/2000/svg"
+                                  >
+                                    <path
+                                      d="M12 5v14M5 12h14"
+                                      stroke="currentColor"
+                                      stroke-width="1.5"
+                                      stroke-linecap="round"
+                                    />
+                                  </svg>`}
+                                </button>
+                                <input
+                                  id="ci-agent-file-input"
+                                  class="ci-agent-file-input"
+                                  type="file"
+                                  multiple
+                                  @change="${this.handleAgentFilesSelected}"
+                                />
+                              `
+                            : ''}
+                          ${modeOptions.length && activeMode
+                            ? html`
+                                <div class="ci-agent-select">
+                                  <button
+                                    class="ci-agent-select-trigger"
+                                    title="切换模式"
+                                    @click="${(e: MouseEvent) => {
+                                      e.stopPropagation();
+                                      this.toggleAgentMenu('mode');
+                                    }}"
+                                  >
+                                    ${renderAgentIcon(
+                                      activeMode?.icon || 'globe'
+                                    )}
+                                    <span class="ci-agent-select-label"
+                                      >${activeMode?.label || ''}</span
+                                    >
+                                    ${activeMode?.subLabel
+                                      ? html`<span class="ci-agent-select-sub"
+                                          >${activeMode.subLabel}</span
+                                        >`
+                                      : ''}
+                                    <span class="ci-agent-select-caret"
+                                      >${html`<svg
+                                        width="12"
+                                        height="12"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                      >
+                                        <path
+                                          d="M6 9l6 6 6-6"
+                                          stroke="currentColor"
+                                          stroke-width="1.5"
+                                          stroke-linecap="round"
+                                          stroke-linejoin="round"
+                                        />
+                                      </svg>`}</span
+                                    >
+                                  </button>
+                                  ${this.agentModeOpen
+                                    ? html`<div class="ci-agent-select-menu">
+                                        ${modeOptions.map(
+                                          (option) => html`
+                                            <button
+                                              class="ci-agent-select-option ${option.disabled
+                                                ? 'disabled'
+                                                : ''} ${option.value ===
+                                              this.agentMode
+                                                ? 'active'
+                                                : ''}"
+                                              @click="${(e: MouseEvent) => {
+                                                e.stopPropagation();
+                                                this.selectAgentOption(
+                                                  'mode',
+                                                  option
+                                                );
+                                              }}"
+                                            >
+                                              ${renderAgentIcon(
+                                                option.icon || 'globe'
+                                              )}
+                                              <span class="ci-agent-select-label"
+                                                >${option.label}</span
+                                              >
+                                              ${option.subLabel
+                                                ? html`<span
+                                                    class="ci-agent-select-sub"
+                                                    >${option.subLabel}</span
+                                                  >`
+                                                : ''}
+                                            </button>
+                                          `
+                                        )}
+                                      </div>`
+                                    : ''}
+                                </div>
+                              `
+                            : ''}
+                          ${providerOptions.length && activeProvider
+                            ? html`
+                                <div class="ci-agent-select">
+                                  <button
+                                    class="ci-agent-select-trigger"
+                                    title="切换提供商"
+                                    @click="${(e: MouseEvent) => {
+                                      e.stopPropagation();
+                                      this.toggleAgentMenu('provider');
+                                    }}"
+                                  >
+                                    ${renderAgentIcon(
+                                      activeProvider?.icon || 'model'
+                                    )}
+                                    <span class="ci-agent-select-label"
+                                      >${activeProvider?.label || ''}</span
+                                    >
+                                    ${activeProvider?.subLabel
+                                      ? html`<span class="ci-agent-select-sub"
+                                          >${activeProvider.subLabel}</span
+                                        >`
+                                      : ''}
+                                    <span class="ci-agent-select-caret"
+                                      >${html`<svg
+                                        width="12"
+                                        height="12"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                      >
+                                        <path
+                                          d="M6 9l6 6 6-6"
+                                          stroke="currentColor"
+                                          stroke-width="1.5"
+                                          stroke-linecap="round"
+                                          stroke-linejoin="round"
+                                        />
+                                      </svg>`}</span
+                                    >
+                                  </button>
+                                  ${this.agentProviderOpen
+                                    ? html`<div class="ci-agent-select-menu">
+                                        ${providerOptions.map(
+                                          (option) => html`
+                                            <button
+                                              class="ci-agent-select-option ${option.disabled
+                                                ? 'disabled'
+                                                : ''} ${option.value ===
+                                              this.agentProvider
+                                                ? 'active'
+                                                : ''}"
+                                              @click="${(e: MouseEvent) => {
+                                                e.stopPropagation();
+                                                this.selectAgentOption(
+                                                  'provider',
+                                                  option
+                                                );
+                                              }}"
+                                            >
+                                              ${renderAgentIcon(
+                                                option.icon || 'model'
+                                              )}
+                                              <span class="ci-agent-select-label"
+                                                >${option.label}</span
+                                              >
+                                              ${option.subLabel
+                                                ? html`<span
+                                                    class="ci-agent-select-sub"
+                                                    >${option.subLabel}</span
+                                                  >`
+                                                : ''}
+                                            </button>
+                                          `
+                                        )}
+                                      </div>`
+                                    : ''}
+                                </div>
+                              `
+                            : ''}
+                        </div>
+                        <div class="ci-agent-controls-right">
+                          ${this.agentLoading
+                            ? html`
+                                <button
+                                  class="ci-agent-send ci-agent-stop"
+                                  title="取消"
+                                  @click="${this.cancelAgent}"
                                 >
-                                  <path
-                                    d="M22 2L11 13"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                  />
-                                  <path
-                                    d="M22 2L15 22l-4-9-9-4 20-7z"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                  />
-                                </svg>`}</span
-                              >
-                            `}
-                        <span
-                          class="ci-action"
-                          title="关闭"
-                          @click="${() => {
-                            this.closeChat();
-                            this.removeCover(true);
-                          }}"
-                          >${html`<svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            xmlns="http://www.w3.org/2000/svg"
+                                  ${html`<svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    xmlns="http://www.w3.org/2000/svg"
+                                  >
+                                    <rect
+                                      x="6"
+                                      y="6"
+                                      width="12"
+                                      height="12"
+                                      rx="2"
+                                      stroke="currentColor"
+                                      stroke-width="1.5"
+                                    />
+                                  </svg>`}
+                                </button>
+                              `
+                            : html`
+                                <button
+                                  class="ci-agent-send ${canSend
+                                    ? ''
+                                    : 'disabled'}"
+                                  title="发送"
+                                  ?disabled=${!canSend}
+                                  @click="${() =>
+                                    canSend && this.submitAgent()}"
+                                >
+                                  ${html`<svg
+                                    width="16"
+                                    height="16"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    xmlns="http://www.w3.org/2000/svg"
+                                  >
+                                    <path
+                                      d="M5 12h10"
+                                      stroke="currentColor"
+                                      stroke-width="1.6"
+                                      stroke-linecap="round"
+                                    />
+                                    <path
+                                      d="M12 6l6 6-6 6"
+                                      stroke="currentColor"
+                                      stroke-width="1.6"
+                                      stroke-linecap="round"
+                                      stroke-linejoin="round"
+                                    />
+                                  </svg>`}
+                                </button>
+                              `}
+                          <button
+                            class="ci-agent-close"
+                            title="关闭"
+                            @click="${() => {
+                              this.closeChat();
+                              this.removeCover(true);
+                            }}"
                           >
-                            <path
-                              d="M18 6 6 18"
-                              stroke="currentColor"
-                              stroke-width="2"
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                            />
-                            <path
-                              d="m6 6 12 12"
-                              stroke="currentColor"
-                              stroke-width="2"
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                            />
-                          </svg>`}</span
-                        >
+                            ${html`<svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              xmlns="http://www.w3.org/2000/svg"
+                            >
+                              <path
+                                d="M18 6 6 18"
+                                stroke="currentColor"
+                                stroke-width="1.6"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                              />
+                              <path
+                                d="m6 6 12 12"
+                                stroke="currentColor"
+                                stroke-width="1.6"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                              />
+                            </svg>`}
+                          </button>
+                        </div>
                       </div>
                     </div>
-                    ${this.agentTrace
-                      ? html`<pre class="ci-agent-output ci-agent-trace">
-                          ${this.agentTrace}
-                        </pre>`
-                      : ''}
-                    ${this.agentReasoning
-                      ? html`<pre class="ci-agent-output ci-agent-reasoning">
-                          ${this.agentReasoning}
-                        </pre>`
-                      : ''}
-                    ${this.agentActions
-                      ? html`<pre class="ci-agent-output ci-agent-actions">
-                          ${this.agentActions}
-                        </pre>`
-                      : ''}
-                    ${this.agentOutput
-                      ? html`<pre class="ci-agent-output">${this.agentOutput}</pre>`
+                    <div
+                      class="ci-agent-status ${this.agentError
+                        ? 'error'
+                        : ''}"
+                    >
+                      ${this.agentLoading
+                        ? '生成中…'
+                        : this.agentError || ''}
+                    </div>
+                    ${showLog
+                      ? html`<div id="ci-agent-log" class="ci-agent-log">
+                          <div class="ci-agent-timeline">
+                            ${cotBlocks.length
+                              ? html`<details
+                                  class="ci-cot"
+                                  ?open=${!hasResponse}
+                                >
+                                  <summary class="ci-cot-summary">
+                                    <span class="ci-cot-icon"
+                                      >${html`<svg
+                                        width="16"
+                                        height="16"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                      >
+                                        <path
+                                          d="M12 3a7 7 0 0 0-4.7 12.1c.4.3.7.8.7 1.3V19a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.6c0-.5.3-1 .7-1.3A7 7 0 0 0 12 3Z"
+                                          stroke="currentColor"
+                                          stroke-width="1.5"
+                                        />
+                                        <path
+                                          d="M9 21h6"
+                                          stroke="currentColor"
+                                          stroke-width="1.5"
+                                        />
+                                      </svg>`}</span>
+                                    <span class="ci-cot-title"
+                                      >Chain of Thought</span
+                                    >
+                                  </summary>
+                                  <div class="ci-cot-list">
+                                    ${cotBlocks.map((block) =>
+                                      renderTimelineBlock(block, true)
+                                    )}
+                                  </div>
+                                </details>`
+                              : ''}
+                            ${responseBlocks.length
+                              ? html`<div class="ci-response">
+                                  ${responseBlocks.map((block) =>
+                                    renderTimelineBlock(block, false)
+                                  )}
+                                  ${changedFilesBlock}
+                                </div>`
+                              : ''}
+                            ${!responseBlocks.length ? changedFilesBlock : ''}
+                          </div>
+                        </div>`
                       : ''}
                   </div>
                 `
@@ -2349,6 +3964,10 @@ export class CodeInspectorComponent extends LitElement {
       padding: 10px 12px;
       border-radius: 12px;
     }
+    .element-info-content.ci-panel {
+      max-height: calc(100vh - 16px);
+      overflow: auto;
+    }
     .ci-panel,
     .ci-panel * {
       pointer-events: auto;
@@ -2413,25 +4032,49 @@ export class CodeInspectorComponent extends LitElement {
       flex: 0 0 auto;
     }
     .ci-breadcrumb-controls {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
+      position: relative;
+      width: 58px;
+      height: 58px;
       flex-shrink: 0;
     }
     .ci-arrow {
-      width: 16px;
-      height: 16px;
+      position: absolute;
+      width: 18px;
+      height: 18px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       color: #4e5969;
       cursor: pointer;
-      border-radius: 6px;
+      border-radius: 999px;
       user-select: none;
+      background: rgba(0, 0, 0, 0.03);
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
     }
     .ci-arrow:hover {
-      background: rgba(0, 0, 0, 0.06);
+      background: rgba(0, 0, 0, 0.08);
       color: #1d2129;
+    }
+    .ci-arrow-up {
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+    .ci-arrow-down {
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+    .ci-arrow-left {
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+    .ci-arrow-right {
+      right: 0;
+      top: 50%;
+      transform: translateY(-50%);
     }
     .ci-arrow.disabled {
       opacity: 0.35;
@@ -2441,93 +4084,561 @@ export class CodeInspectorComponent extends LitElement {
     .ci-agent {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 10px;
       margin-top: 8px;
     }
-    .ci-agent-input {
-      width: 100%;
-      min-height: 78px;
-      max-height: 40vh;
-      resize: vertical;
+    .ci-agent-box {
       border: 1px solid #e5e6eb;
-      border-radius: 10px;
-      padding: 8px 10px;
-      font-size: 12px;
-      outline: none;
-      box-sizing: border-box;
-      font-family: inherit;
+      border-radius: 16px;
+      padding: 12px;
       background: #fff;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
     }
-    .ci-agent-input:focus {
+    .ci-agent-box:focus-within {
       border-color: #006aff;
       box-shadow: 0 0 0 2px rgba(0, 106, 255, 0.15);
     }
-    .ci-agent-footer {
+    .ci-agent-input {
+      width: 100%;
+      min-height: 84px;
+      max-height: 40vh;
+      resize: none;
+      border: none;
+      padding: 0;
+      font-size: 14px;
+      line-height: 1.5;
+      color: #1d2129;
+      outline: none;
+      box-sizing: border-box;
+      font-family: inherit;
+      background: transparent;
+    }
+    .ci-agent-input::placeholder {
+      color: #9aa0a6;
+    }
+    .ci-agent-controls {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .ci-agent-controls-left {
+      display: flex;
+      align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
+    }
+    .ci-agent-controls-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .ci-agent-icon-button {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #4e5969;
+      border-radius: 999px;
+      border: 1px solid #e5e6eb;
+      background: #fff;
+      cursor: pointer;
+      user-select: none;
+    }
+    .ci-agent-icon-button:hover {
+      background: #f2f3f5;
+      color: #1d2129;
+    }
+    .ci-agent-file-input {
+      display: none;
+    }
+    .ci-agent-select {
+      position: relative;
+    }
+    .ci-agent-select-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid #e5e6eb;
+      background: #fff;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      color: #1d2129;
+      cursor: pointer;
+      user-select: none;
+    }
+    .ci-agent-select-trigger:hover {
+      border-color: #c9cdd4;
+    }
+    .ci-agent-select-label {
+      font-weight: 500;
+    }
+    .ci-agent-select-sub {
+      color: #6b7280;
+      font-size: 11px;
+    }
+    .ci-agent-select-caret {
+      margin-left: 2px;
+      display: inline-flex;
+      color: #86909c;
+    }
+    .ci-agent-select-menu {
+      position: absolute;
+      bottom: 110%;
+      left: 0;
+      min-width: 180px;
+      background: #fff;
+      border: 1px solid #e5e6eb;
+      border-radius: 12px;
+      padding: 6px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+      z-index: 10;
+    }
+    .ci-agent-select-option {
+      width: 100%;
+      text-align: left;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: none;
+      background: transparent;
+      font-size: 12px;
+      color: #1d2129;
+      cursor: pointer;
+      border-radius: 8px;
+    }
+    .ci-agent-select-option:hover {
+      background: #f2f3f5;
+    }
+    .ci-agent-select-option.active {
+      background: #e8f1ff;
+      color: #0057d9;
+    }
+    .ci-agent-select-option.disabled {
+      color: #9aa0a6;
+      cursor: not-allowed;
+    }
+    .ci-agent-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .ci-agent-attachment {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid #e5e6eb;
+      background: #f8f9fb;
+      border-radius: 10px;
+      padding: 6px 8px;
+      max-width: 100%;
+    }
+    .ci-agent-attachment-thumb {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    .ci-agent-attachment-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: #fff;
+      border: 1px solid #e5e6eb;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #4e5969;
+      flex-shrink: 0;
+    }
+    .ci-agent-attachment-meta {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .ci-agent-attachment-name {
+      font-size: 12px;
+      color: #1d2129;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ci-agent-attachment-size {
+      font-size: 11px;
+      color: #86909c;
+    }
+    .ci-agent-attachment-remove {
+      border: none;
+      background: transparent;
+      color: #86909c;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 4px;
+      border-radius: 6px;
+    }
+    .ci-agent-attachment-remove:hover {
+      background: #e5e6eb;
+      color: #1d2129;
+    }
+    .ci-agent-send {
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      border: none;
+      background: #1677ff;
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .ci-agent-send.disabled {
+      background: #d0d5dc;
+      cursor: not-allowed;
+    }
+    .ci-agent-stop {
+      background: #f53f3f;
+    }
+    .ci-agent-close {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      border: 1px solid #e5e6eb;
+      background: #fff;
+      color: #4e5969;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .ci-agent-status {
       font-size: 11px;
       color: #86909c;
       min-height: 14px;
+      padding-left: 4px;
     }
     .ci-agent-status.error {
       color: #f53f3f;
     }
-    .ci-agent-actions {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      flex-shrink: 0;
+    .ci-agent-close:hover {
+      background: #f2f3f5;
+      color: #1d2129;
     }
-    .ci-action {
-      width: 18px;
-      height: 18px;
+    .ci-agent-log {
+      margin: 0;
+      padding: 10px;
+      border-radius: 14px;
+      border: 1px solid #e5e6eb;
+      background: linear-gradient(180deg, #ffffff 0%, #f8f9fb 100%);
+      max-height: 300px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .ci-cot {
+      border-radius: 12px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: #ffffff;
+      padding: 8px 10px;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+    }
+    .ci-cot-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      list-style: none;
+      color: #111827;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .ci-cot-summary::-webkit-details-marker {
+      display: none;
+    }
+    .ci-cot-icon {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      color: #4e5969;
-      cursor: pointer;
+      width: 24px;
+      height: 24px;
       border-radius: 8px;
-      user-select: none;
+      background: #f3f4f6;
+      color: #6b7280;
     }
-    .ci-action:hover {
-      background: rgba(0, 0, 0, 0.06);
-      color: #1d2129;
+    .ci-cot-title {
+      font-weight: 600;
     }
-    .ci-action.disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
-      pointer-events: none;
+    .ci-cot-list {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
     }
-    .ci-agent-output {
+    .ci-response {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .ci-agent-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .ci-agent-block {
+      background: #ffffff;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 12px;
+      padding: 10px 12px;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+    }
+    .ci-agent-block-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      color: #6b7280;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .ci-agent-block-title {
+      font-weight: 600;
+      color: #111827;
+      font-size: 12px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .ci-agent-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #cbd5f5;
+      flex-shrink: 0;
+    }
+    .ci-agent-block-tool .ci-agent-dot {
+      background: #f59e0b;
+    }
+    .ci-agent-block-reasoning .ci-agent-dot {
+      background: #a78bfa;
+    }
+    .ci-agent-block-text .ci-agent-dot {
+      background: #60a5fa;
+    }
+    .ci-agent-block-source .ci-agent-dot {
+      background: #38bdf8;
+    }
+    .ci-agent-block-file .ci-agent-dot {
+      background: #94a3b8;
+    }
+    .ci-agent-block-error .ci-agent-dot {
+      background: #f87171;
+    }
+    .ci-agent-block-changes .ci-agent-dot {
+      background: #34d399;
+    }
+    .ci-agent-block-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .ci-agent-block-body p {
       margin: 0;
-      padding: 8px 10px;
-      border-radius: 10px;
-      border: 1px solid #e5e6eb;
-      background: #f7f8fa;
-      color: #1d2129;
-      max-height: 220px;
-      overflow: auto;
+      white-space: pre-wrap;
+      color: #111827;
+    }
+    .ci-agent-block-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .ci-agent-block-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .ci-agent-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #4f46e5;
+      font-size: 10px;
+      font-weight: 500;
+    }
+    .ci-agent-pill-muted {
+      background: #f3f4f6;
+      color: #6b7280;
+    }
+    .ci-agent-content {
       white-space: pre-wrap;
       word-break: break-word;
-      font-size: 11px;
-      line-height: 1.45;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-        'Liberation Mono', 'Courier New', monospace;
     }
-    .ci-agent-reasoning {
-      background: #f2f7ff;
-    }
-    .ci-agent-actions {
-      background: #f6f6f6;
+    .ci-agent-content-reasoning {
       color: #4e5969;
     }
-    .ci-agent-trace {
-      background: #111827;
-      color: #e5e7eb;
+    .ci-agent-content-error {
+      color: #f53f3f;
+    }
+    .ci-agent-paragraphs {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .ci-agent-paragraphs p {
+      margin: 0;
+      white-space: pre-wrap;
+      color: #111827;
+    }
+    .ci-agent-meta-list {
+      display: grid;
+      grid-template-columns: 80px 1fr;
+      gap: 6px 10px;
+      margin-top: 8px;
+      font-size: 11px;
+    }
+    .ci-agent-meta-key {
+      font-size: 10px;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .ci-agent-meta-value {
+      color: #111827;
+      word-break: break-word;
+    }
+    .ci-agent-preview {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed rgba(148, 163, 184, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .ci-agent-preview-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: #111827;
+    }
+    .ci-agent-preview-lines {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        'Liberation Mono', 'Courier New', monospace;
+      font-size: 10px;
+      color: #374151;
+    }
+    .ci-agent-preview-line {
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: #f8fafc;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+    .ci-agent-preview-line:first-child {
+      background: #fef3c7;
+      border-color: rgba(251, 191, 36, 0.3);
+    }
+    .ci-agent-preview-empty {
+      font-size: 10px;
+      color: #9ca3af;
+    }
+    .ci-agent-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .ci-agent-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #4f46e5;
+      font-size: 10px;
+      font-weight: 500;
+      text-decoration: none;
+    }
+    .ci-agent-chip-host {
+      display: inline-flex;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(79, 70, 229, 0.12);
+      color: #4f46e5;
+      font-size: 9px;
+      font-weight: 500;
+    }
+    .ci-agent-file-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .ci-agent-file-item {
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid #e5e7eb;
+      background: #f8fafc;
+      min-width: 120px;
+    }
+    .ci-agent-file-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: #111827;
+    }
+    .ci-agent-file-meta {
+      font-size: 10px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+    .ci-agent-details {
+      border-radius: 10px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: #f9fafb;
+      padding: 6px 8px;
+    }
+    .ci-agent-details summary {
+      cursor: pointer;
+      font-size: 11px;
+      color: #6b7280;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .ci-agent-details summary::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 3px;
+      background: #cbd5f5;
+    }
+    .ci-agent-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .ci-agent-details-preview {
+      font-size: 10px;
+      color: #9ca3af;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 180px;
     }
     .element-info-top {
       top: -4px;
