@@ -297,6 +297,9 @@ export class CodeInspectorComponent extends LitElement {
   > = {};
   private elementInfoResizeObserver?: ResizeObserver;
   private elementInfoRepositioning = false;
+  private coverRenderRequestId = 0;
+  private elementInfoPositionRequestId = 0;
+  private anchorNode: HTMLElement | null = null;
   @state()
   componentChain: ComponentFiberInfo[] = [];
   @state()
@@ -373,11 +376,19 @@ export class CodeInspectorComponent extends LitElement {
     this.elementInfoRepositioning = true;
     requestAnimationFrame(async () => {
       this.elementInfoRepositioning = false;
-      if (!this.show || this.showNodeTree || !this.targetNode || !this.elementInfoRef) {
+      const anchorElement = this.getCurrentAnchorElement();
+      const requestId = ++this.elementInfoPositionRequestId;
+      if (!this.show || this.showNodeTree || !anchorElement || !this.elementInfoRef) {
         return;
       }
       const { vertical, horizon, additionStyle } =
-        await this.calculateElementInfoPosition(this.targetNode);
+        await this.calculateElementInfoPosition(anchorElement);
+      if (
+        requestId !== this.elementInfoPositionRequestId ||
+        this.getCurrentAnchorElement() !== anchorElement
+      ) {
+        return;
+      }
       this.elementTipStyle = {
         vertical,
         horizon,
@@ -389,6 +400,44 @@ export class CodeInspectorComponent extends LitElement {
 
   private handleViewportChange = () => {
     this.scheduleElementInfoReposition();
+  };
+
+  private getCurrentAnchorElement = () => {
+    if (this.chatOpen) {
+      return (
+        this.breadcrumb[this.breadcrumbIndex]?.element ||
+        this.anchorNode ||
+        this.targetNode
+      );
+    }
+    return this.anchorNode || this.targetNode;
+  };
+
+  private getHoverNodePath = (e: MouseEvent | TouchEvent) => {
+    const point =
+      e instanceof MouseEvent
+        ? { x: e.clientX, y: e.clientY }
+        : {
+            x: (e.touches[0] || e.changedTouches[0])?.clientX ?? 0,
+            y: (e.touches[0] || e.changedTouches[0])?.clientY ?? 0,
+          };
+    const elements =
+      typeof document.elementsFromPoint === 'function'
+        ? document.elementsFromPoint(point.x, point.y)
+        : [];
+    const firstPageElement = elements.find(
+      (node) => node instanceof HTMLElement && !this.contains(node)
+    ) as HTMLElement | undefined;
+    const start = firstPageElement || (e.target instanceof HTMLElement ? e.target : null);
+    if (!start) return [];
+
+    const path: HTMLElement[] = [];
+    let current: HTMLElement | null = start;
+    while (current) {
+      path.push(current);
+      current = current.parentElement;
+    }
+    return path;
   };
 
   private getViewportBounds = () => {
@@ -509,13 +558,21 @@ export class CodeInspectorComponent extends LitElement {
   };
 
   // 渲染遮罩层
-  renderCover = async (target: HTMLElement) => {
-    if (target === this.targetNode) {
+  renderCover = async (target: HTMLElement, anchor: HTMLElement = target) => {
+    if (
+      target === this.targetNode &&
+      anchor === this.anchorNode &&
+      !this.chatOpen &&
+      !this.forceOutlineNextCover
+    ) {
       return;
     }
+    const requestId = ++this.coverRenderRequestId;
+    this.elementInfoPositionRequestId += 1;
     this.targetNode = target;
+    this.anchorNode = anchor;
     // 设置 target 的位置
-    const { top, right, bottom, left } = target.getBoundingClientRect();
+    const { top, right, bottom, left } = anchor.getBoundingClientRect();
     const browserHeight = document.documentElement.clientHeight;
     const browserWidth = document.documentElement.clientWidth;
     const area = Math.max(0, right - left) * Math.max(0, bottom - top);
@@ -568,8 +625,16 @@ export class CodeInspectorComponent extends LitElement {
     this.element = this.getSourceInfo(target)!;
     this.show = true;
     if (!this.showNodeTree) {
+      await this.updateComplete;
       const { vertical, horizon, additionStyle } =
-        await this.calculateElementInfoPosition(target);
+        await this.calculateElementInfoPosition(anchor);
+      if (
+        requestId !== this.coverRenderRequestId ||
+        this.targetNode !== target ||
+        this.anchorNode !== anchor
+      ) {
+        return;
+      }
       this.elementTipStyle = {
         vertical,
         horizon,
@@ -584,19 +649,13 @@ export class CodeInspectorComponent extends LitElement {
   private pickTargetNode = (
     validNodeList: { node: HTMLElement; isAstro: boolean }[]
   ): HTMLElement | null => {
-    let targetNode: HTMLElement | null = null;
     for (const { node, isAstro } of validNodeList) {
       if (isAstro) {
         return node;
       }
-      if (!targetNode) {
-        targetNode = node;
-      } else if (this.isSamePositionNode(targetNode, node)) {
-        // Prefer the component callsite when it shares the same rect.
-        targetNode = node;
-      }
+      return node;
     }
-    return targetNode;
+    return null;
   };
 
   private buildBreadcrumbFromNodePath = (
@@ -815,7 +874,6 @@ export class CodeInspectorComponent extends LitElement {
     const column = Number(segments[segments.length - 2]);
     const line = Number(segments[segments.length - 3]);
     const path = segments.slice(0, segments.length - 3).join(':');
-    console.log(paths,name,"validNodeList")
     return { name, path, line, column };
   };
 
@@ -825,6 +883,7 @@ export class CodeInspectorComponent extends LitElement {
     }
     this.clearSelectedContextOnServer();
     this.targetNode = null;
+    this.anchorNode = null;
     this.show = false;
     this.removeGlobalCursorStyle();
     document.body.style.userSelect = this.preUserSelect;
@@ -1150,11 +1209,14 @@ export class CodeInspectorComponent extends LitElement {
       ((this.isTracking(e) && !this.dragging) || this.open) &&
       !this.hoverSwitch
     ) {
-      const nodePath = e.composedPath() as HTMLElement[];
-      const validNodeList = this.getValidNodeList(nodePath);
-      const targetNode = this.pickTargetNode(validNodeList);
+      const nodePath = this.getHoverNodePath(e);
+      const { items, targetNode } = this.buildBreadcrumbFromNodePath(
+        nodePath as EventTarget[]
+      );
+      const anchorNode =
+        items[items.length - 1]?.element || targetNode || nodePath[0] || null;
       if (targetNode) {
-        this.renderCover(targetNode);
+        this.renderCover(targetNode, anchorNode || targetNode);
       } else {
         this.removeCover();
       }
@@ -2327,7 +2389,7 @@ export class CodeInspectorComponent extends LitElement {
   };
 
   private buildClientContextPrompt = () => {
-    const dom = this.targetNode;
+    const dom = this.getCurrentAnchorElement();
     const tagName = dom?.tagName?.toLowerCase?.() || '';
     const firstClass = dom?.classList?.[0] || '';
     const className = (dom as any)?.className || '';
@@ -3212,6 +3274,7 @@ export class CodeInspectorComponent extends LitElement {
             </div>
           </div>
         </div>
+      </div>
         <div
           id="element-info"
           class="element-info ${this.elementTipStyle.vertical} ${this
@@ -3823,7 +3886,6 @@ export class CodeInspectorComponent extends LitElement {
               : html`<span class="ci-tip-tag">${this.element.name}</span>`}
           </div>
         </div>
-      </div>
       <div
         id="inspector-switch"
         class="inspector-switch ${this.open
@@ -4059,6 +4121,7 @@ export class CodeInspectorComponent extends LitElement {
     }
     .element-info {
       position: absolute;
+      pointer-events: none;
     }
     .element-info.hidden {
       visibility: hidden;
@@ -4073,7 +4136,7 @@ export class CodeInspectorComponent extends LitElement {
       box-sizing: border-box;
       padding: 4px 8px;
       border-radius: 4px;
-      pointer-events: auto;
+      pointer-events: none;
     }
     .ci-tip {
       padding: 6px 10px;

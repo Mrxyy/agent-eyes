@@ -151,6 +151,9 @@ export declare class CodeInspectorComponent extends LitElement {
     private agentToolCallDrafts;
     private elementInfoResizeObserver?;
     private elementInfoRepositioning;
+    private coverRenderRequestId;
+    private elementInfoPositionRequestId;
+    private anchorNode;
     componentChain: ComponentFiberInfo[];
     componentChainIndex: number;
     private componentBreadcrumbsByChain;
@@ -176,6 +179,8 @@ export declare class CodeInspectorComponent extends LitElement {
     getDomPropertyValue: (target: HTMLElement, property: string) => number;
     private scheduleElementInfoReposition;
     private handleViewportChange;
+    private getCurrentAnchorElement;
+    private getHoverNodePath;
     private getViewportBounds;
     calculateElementInfoPosition: (target: HTMLElement) => Promise<{
         vertical: string;
@@ -202,7 +207,7 @@ export declare class CodeInspectorComponent extends LitElement {
             '--ci-panel-max-height': string;
         };
     }>;
-    renderCover: (target: HTMLElement) => Promise<void>;
+    renderCover: (target: HTMLElement, anchor?: HTMLElement) => Promise<void>;
     private pickTargetNode;
     private buildBreadcrumbFromNodePath;
     private buildNodeTreeFromBreadcrumb;
