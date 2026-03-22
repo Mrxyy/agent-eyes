@@ -9,7 +9,11 @@
 
 <hr />
 
-**Language / 语言**: [简体中文](./README.md) | English
+**Language / 语言**: [简体中文](./README.zh-CN.md) | English
+
+```bash
+npx skills add https://github.com/Mrxyy/agents-eyes
+```
 
 ## Project Links
 
@@ -81,12 +85,6 @@ Click an element to open your editor at the exact source location. This classic 
 
 Recommended: **install the `agent-eyes` skill first**.
 The skill checks whether `@agent-eyes/agent-eyes` is installed in your project. If missing, it guides (or helps) installation, then reads the currently selected page context.
-
-Run:
-
-```bash
-npx skills add https://github.com/Mrxyy/agents-eyes
-```
 
 <details>
   <summary><b>Manual Installation</b></summary>
@@ -366,7 +364,7 @@ Notes:
 
 ## Acknowledgements
 
-Agent Eyes evolves from the original project. Current repository: https://github.com/Mrxyy/agents-eyes. Thanks to the original author and contributors.
+Agent Eyes evolves from [code-inspector](https://github.com/zh-lx/code-inspector). Thanks to the original author and contributors.
 
 ## License
 

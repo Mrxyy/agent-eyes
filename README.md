@@ -1,1 +1,1 @@
-packages/code-inspector-plugin/README.md
+packages/code-inspector-plugin/README.en.md
