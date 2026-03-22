@@ -32,11 +32,82 @@ export function getRelativeOrAbsolutePath(
   return pathType === 'relative' ? getRelativePath(filePath) : filePath;
 }
 
+const agentEyesRuleSection = `## Agent Eyes Workflow
+
+For any task that may modify UI, DOM structure, styles, component behavior, page content, or selected elements:
+
+1. First verify that \`code-inspector-plugin\` is installed in this project.
+2. Before making any code change, request \`GET http://127.0.0.1:5678/context/selected\`.
+3. If the response contains \`data: null\`, do not guess the target code.
+4. Ask the user to open Agent Eyes, select the target element, and keep the selection panel open.
+5. Only after a non-null context is returned may you use that context to locate and modify code precisely.
+
+Use the selected context fields \`filePath\`, \`line\`, \`column\`, \`elementName\`, \`dom\`, and \`domPath\` to anchor the change request.
+
+If \`code-inspector-plugin\` is missing:
+
+- \`pnpm add -D code-inspector-plugin\`
+- \`yarn add -D code-inspector-plugin\`
+- \`npm i -D code-inspector-plugin\`
+
+Then add the minimal bundler configuration required by the current project before continuing.
+`;
+
+function detectPackageManager(rootDir: string) {
+  if (fs.existsSync(path.join(rootDir, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (fs.existsSync(path.join(rootDir, 'yarn.lock'))) return 'yarn';
+  if (fs.existsSync(path.join(rootDir, 'package-lock.json'))) return 'npm';
+  return 'npm';
+}
+
+function readProjectPackageMeta(rootDir: string) {
+  const packageJsonPath = path.join(rootDir, 'package.json');
+  if (!fs.existsSync(packageJsonPath)) {
+    return {
+      packageJsonPath,
+      packageExists: false,
+      pluginInstalled: false,
+    };
+  }
+  try {
+    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+    const deps = {
+      ...(pkg?.dependencies || {}),
+      ...(pkg?.devDependencies || {}),
+    };
+    return {
+      packageJsonPath,
+      packageExists: true,
+      pluginInstalled: !!deps['code-inspector-plugin'],
+    };
+  } catch {
+    return {
+      packageJsonPath,
+      packageExists: true,
+      pluginInstalled: false,
+    };
+  }
+}
+
+function getAgentsFileStatus(rootDir: string) {
+  const agentsPath = path.join(rootDir, 'AGENTS.md');
+  const exists = fs.existsSync(agentsPath);
+  const content = exists ? fs.readFileSync(agentsPath, 'utf-8') : '';
+  const hasRule = content.includes('## Agent Eyes Workflow');
+  return {
+    agentsPath,
+    exists,
+    hasRule,
+  };
+}
+
 export function createServer(
   callback: (port: number) => any,
   options?: CodeOptions,
   record?: RecordInfo
 ) {
+  let latestSelectedContext: Record<string, any> | null = null;
+
   const server = http.createServer((req: any, res: any) => {
     void (async () => {
       const corsHeaders = {
@@ -47,6 +118,239 @@ export function createServer(
       };
 
       const url = new URL(req.url || '/', 'http://127.0.0.1');
+
+      const readJsonBody = async (maxPayloadBytes: number) => {
+        let raw = '';
+        await new Promise<void>((resolve, reject) => {
+          req.on('data', (chunk: Buffer) => {
+            raw += chunk.toString('utf-8');
+            if (raw.length > maxPayloadBytes) {
+              reject(new Error('payload too large'));
+              req.destroy();
+            }
+          });
+          req.on('end', () => resolve());
+          req.on('error', reject);
+        });
+
+        if (!raw) return {};
+        try {
+          return JSON.parse(raw);
+        } catch {
+          throw new Error('invalid json');
+        }
+      };
+
+      const projectRoot = path.resolve(record?.root || record?.envDir || process.cwd());
+
+      if (url.pathname === '/context/selected') {
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, corsHeaders);
+          res.end();
+          return;
+        }
+
+        if (req.method === 'DELETE') {
+          latestSelectedContext = null;
+          res.writeHead(200, {
+            ...corsHeaders,
+            'Content-Type': 'application/json; charset=utf-8',
+          });
+          res.end(
+            JSON.stringify({
+              success: true,
+              data: null,
+            })
+          );
+          return;
+        }
+
+        if (req.method === 'POST') {
+          const maxPayloadMb = Number(
+            process.env.CODE_INSPECTOR_ACP_MAX_PAYLOAD_MB || 2
+          );
+          const maxPayloadBytes = Number.isFinite(maxPayloadMb)
+            ? Math.max(1, maxPayloadMb) * 1024 * 1024
+            : 2 * 1024 * 1024;
+          let body: any = {};
+          try {
+            body = await readJsonBody(maxPayloadBytes);
+          } catch (e: any) {
+            res.writeHead(400, {
+              ...corsHeaders,
+              'Content-Type': 'application/json; charset=utf-8',
+            });
+            res.end(
+              JSON.stringify({
+                success: false,
+                message: String(e?.message || e),
+              })
+            );
+            return;
+          }
+
+          const filePath = String(
+            body.filePath || body.file || body.path || body.element?.path || ''
+          );
+          const line = Number(body.line || body.element?.line || 0);
+          const column = Number(body.column || body.element?.column || 0);
+          const elementName = String(
+            body.elementName || body.element?.name || body.element?.elementName || ''
+          );
+          const dom = body.dom || {};
+          const domPath = Array.isArray(body.domPath)
+            ? body.domPath.map((item: any) => item?.label || item?.name || item).filter(Boolean)
+            : [];
+          const contextPrompt = String(body.contextPrompt || body.context || '');
+          if (!filePath) {
+            latestSelectedContext = null;
+            res.writeHead(200, {
+              ...corsHeaders,
+              'Content-Type': 'application/json; charset=utf-8',
+            });
+            res.end(
+              JSON.stringify({
+                success: true,
+                data: null,
+              })
+            );
+            return;
+          }
+          latestSelectedContext = {
+            filePath,
+            line,
+            column,
+            elementName,
+            dom: {
+              tagName: String(dom.tagName || ''),
+              firstClass: String(dom.firstClass || ''),
+              className: String(dom.className || ''),
+              textContent: String(dom.textContent || ''),
+            },
+            domPath,
+            contextPrompt,
+            updatedAt: Date.now(),
+          };
+
+          res.writeHead(200, {
+            ...corsHeaders,
+            'Content-Type': 'application/json; charset=utf-8',
+          });
+          res.end(
+            JSON.stringify({
+              success: true,
+              data: latestSelectedContext,
+            })
+          );
+          return;
+        }
+
+        if (req.method === 'GET') {
+          res.writeHead(200, {
+            ...corsHeaders,
+            'Content-Type': 'application/json; charset=utf-8',
+          });
+          res.end(
+            JSON.stringify({
+              success: true,
+              data: latestSelectedContext,
+              message: latestSelectedContext
+                ? ''
+                : 'no selected context yet, select an element first',
+            })
+          );
+          return;
+        }
+
+        res.writeHead(405, corsHeaders);
+        res.end('method not allowed');
+        return;
+      }
+
+      if (url.pathname === '/agents-md/status') {
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, corsHeaders);
+          res.end();
+          return;
+        }
+        if (req.method !== 'GET') {
+          res.writeHead(405, corsHeaders);
+          res.end('method not allowed');
+          return;
+        }
+        const packageMeta = readProjectPackageMeta(projectRoot);
+        const agentsMeta = getAgentsFileStatus(projectRoot);
+        const packageManager = detectPackageManager(projectRoot);
+        const installCommand =
+          packageManager === 'pnpm'
+            ? 'pnpm add -D code-inspector-plugin'
+            : packageManager === 'yarn'
+            ? 'yarn add -D code-inspector-plugin'
+            : 'npm i -D code-inspector-plugin';
+        res.writeHead(200, {
+          ...corsHeaders,
+          'Content-Type': 'application/json; charset=utf-8',
+        });
+        res.end(
+          JSON.stringify({
+            success: true,
+            data: {
+              rootDir: projectRoot,
+              packageManager,
+              installCommand,
+              packageJsonPath: packageMeta.packageJsonPath,
+              packageExists: packageMeta.packageExists,
+              pluginInstalled: packageMeta.pluginInstalled,
+              agentsPath: agentsMeta.agentsPath,
+              agentsExists: agentsMeta.exists,
+              agentsHasRule: agentsMeta.hasRule,
+            },
+          })
+        );
+        return;
+      }
+
+      if (url.pathname === '/agents-md/setup') {
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, corsHeaders);
+          res.end();
+          return;
+        }
+        if (req.method !== 'POST') {
+          res.writeHead(405, corsHeaders);
+          res.end('method not allowed');
+          return;
+        }
+        const agentsMeta = getAgentsFileStatus(projectRoot);
+        let nextContent = '';
+        if (!agentsMeta.exists) {
+          nextContent = `# Project Agent Rules\n\n${agentEyesRuleSection}\n`;
+        } else {
+          const current = fs.readFileSync(agentsMeta.agentsPath, 'utf-8');
+          nextContent = agentsMeta.hasRule
+            ? current.replace(
+                /## Agent Eyes Workflow[\s\S]*$/m,
+                agentEyesRuleSection.trimEnd()
+              )
+            : `${current.trimEnd()}\n\n${agentEyesRuleSection}\n`;
+        }
+        fs.writeFileSync(agentsMeta.agentsPath, nextContent, 'utf-8');
+        res.writeHead(200, {
+          ...corsHeaders,
+          'Content-Type': 'application/json; charset=utf-8',
+        });
+        res.end(
+          JSON.stringify({
+            success: true,
+            data: {
+              agentsPath: agentsMeta.agentsPath,
+              created: !agentsMeta.exists,
+              updated: agentsMeta.exists,
+            },
+          })
+        );
+        return;
+      }
 
       // Local agent endpoint: POST /agent
       if (url.pathname === '/agent') {
@@ -65,9 +369,10 @@ export function createServer(
           process.env.CODE_INSPECTOR_ACP_COMMAND ;
         const acpConfig = options?.agent?.acp || {
           command: defaultAcpCommand,
-          args: [],
+          args: [] as string[],
           persistSession: true,
           authMethodId: process.env.CODE_INSPECTOR_ACP_AUTH_METHOD_ID,
+          mcpServers: [],
         };
         if (!acpConfig?.command) {
           res.writeHead(400, corsHeaders);
@@ -84,25 +389,12 @@ export function createServer(
         const maxPayloadBytes = Number.isFinite(maxPayloadMb)
           ? Math.max(1, maxPayloadMb) * 1024 * 1024
           : 10 * 1024 * 1024;
-        let raw = '';
-        await new Promise<void>((resolve, reject) => {
-          req.on('data', (chunk: Buffer) => {
-            raw += chunk.toString('utf-8');
-            if (raw.length > maxPayloadBytes) {
-              reject(new Error('payload too large'));
-              req.destroy();
-            }
-          });
-          req.on('end', () => resolve());
-          req.on('error', reject);
-        });
-
         let body: any = {};
         try {
-          body = raw ? JSON.parse(raw) : {};
-        } catch {
+          body = await readJsonBody(maxPayloadBytes);
+        } catch (e: any) {
           res.writeHead(400, corsHeaders);
-          res.end('invalid json');
+          res.end(String(e?.message || e));
           return;
         }
 

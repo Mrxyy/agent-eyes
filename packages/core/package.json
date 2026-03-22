@@ -39,8 +39,9 @@
   },
   "scripts": {
     "dev": "vite",
-    "build:server": "vite build --watch",
-    "build:client": " vite build --config ./vite.client.config.ts",
+    "build:server": "vite build",
+    "build:server:watch": "vite build --watch",
+    "build:client": "vite build --config ./vite.client.config.ts",
     "build:client:watch": " vite build --config ./vite.client.config.ts --watch",
     "clear": "rimraf ./dist && rimraf ./types",
     "build": "pnpm clear && tsc && pnpm build:server && pnpm build:client",
@@ -48,6 +49,7 @@
     "pub:beta": "pnpm publish --tag beta"
   },
   "dependencies": {
+    "@floating-ui/dom": "^1.7.6",
     "@mcpc-tech/acp-ai-provider": "^0.1.50",
     "@vue/compiler-dom": "^3.5.13",
     "ai": "^5.0.117",

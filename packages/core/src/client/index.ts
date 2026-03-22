@@ -1,6 +1,15 @@
 import { LitElement, TemplateResult, css, html } from 'lit';
 import { property, query, state } from 'lit/decorators.js';
 import { styleMap } from 'lit/directives/style-map.js';
+import {
+  computePosition,
+  flip,
+  offset,
+  size,
+  shift,
+  type Placement,
+  type VirtualElement,
+} from '@floating-ui/dom';
 import { PathName, DefaultPort } from '../shared';
 import type { AgentUiConfig, AgentUiOption } from '../shared';
 import { formatOpenPath } from 'launch-ide';
@@ -49,7 +58,7 @@ interface ElementTipStyle {
   vertical: string;
   horizon: string;
   visibility: string;
-  additionStyle?: Record<string, string>;
+  additionStyle?: Record<string, string | undefined>;
 }
 
 interface TreeNode extends SourceInfo {
@@ -150,7 +159,6 @@ interface AgentAttachment {
 }
 
 const PopperWidth = 300;
-const POPPER_MARGIN = 10; // Margin for popper positioning
 
 function nextTick() {
   return new Promise((resolve) => {
@@ -295,6 +303,7 @@ export class CodeInspectorComponent extends LitElement {
   componentChainIndex = 0;
   private componentBreadcrumbsByChain: Record<number, BreadcrumbNode[]> = {};
   private componentBreadcrumbIndexByChain: Record<number, number> = {};
+  private lastSelectedContextSyncKey = '';
 
   @query('#inspector-switch')
   inspectorSwitchRef!: HTMLDivElement;
@@ -378,38 +387,32 @@ export class CodeInspectorComponent extends LitElement {
     });
   };
 
-  private getViewportClamp = (
-    left: number,
-    top: number,
-    width: number,
-    height: number,
-    browserWidth: number,
-    browserHeight: number
-  ) => {
-    let translateX = 0;
-    let translateY = 0;
-    if (left < 0) {
-      translateX = -left;
-    } else if (left + width > browserWidth) {
-      translateX = browserWidth - (left + width);
-    }
-    if (top < 0) {
-      translateY = -top;
-    } else if (top + height > browserHeight) {
-      translateY = browserHeight - (top + height);
-    }
-    return { translateX, translateY };
-  };
-
   private handleViewportChange = () => {
     this.scheduleElementInfoReposition();
   };
 
+  private getViewportBounds = () => {
+    const vv = window.visualViewport;
+    if (vv) {
+      return {
+        left: vv.offsetLeft || 0,
+        top: vv.offsetTop || 0,
+        width: vv.width || document.documentElement.clientWidth || window.innerWidth || 0,
+        height: vv.height || document.documentElement.clientHeight || window.innerHeight || 0,
+      };
+    }
+    return {
+      left: 0,
+      top: 0,
+      width: document.documentElement.clientWidth || window.innerWidth || 0,
+      height: document.documentElement.clientHeight || window.innerHeight || 0,
+    };
+  };
+
   // 计算 element-info 的最佳位置
   calculateElementInfoPosition = async (target: HTMLElement) => {
-    const { top, right, bottom, left } = target.getBoundingClientRect();
-    const browserHeight = document.documentElement.clientHeight;
-    const browserWidth = document.documentElement.clientWidth;
+    const { top, right, bottom, left, width, height } =
+      target.getBoundingClientRect();
     const marginTop = this.getDomPropertyValue(target, 'margin-top');
     const marginRight = this.getDomPropertyValue(target, 'margin-right');
     const marginBottom = this.getDomPropertyValue(target, 'margin-bottom');
@@ -417,146 +420,92 @@ export class CodeInspectorComponent extends LitElement {
 
     await nextTick();
 
-    const { width, height } = this.elementInfoRef.getBoundingClientRect();
-
-    // 容器的实际边界（包含 margin）
-    const containerTop = top - marginTop;
-    const containerRight = right + marginRight;
-    const containerBottom = bottom + marginBottom;
-    const containerLeft = left - marginLeft;
-
-    // 定义八个位置的计算方法
-    const positions = [
-      // 外部位置
-      {
-        // 右下方(外部)
-        vertical: 'element-info-bottom',
-        horizon: 'element-info-right',
-        top: containerBottom,
-        left: containerLeft,
-        isExternal: true,
-      },
-      {
-        // 左下方(外部)
-        vertical: 'element-info-bottom',
-        horizon: 'element-info-left',
-        top: containerBottom,
-        left: containerRight - width,
-        isExternal: true,
-      },
-      {
-        // 右上方(外部)
-        vertical: 'element-info-top',
-        horizon: 'element-info-right',
-        top: containerTop - height,
-        left: containerLeft,
-        isExternal: true,
-      },
-      {
-        // 左上方(外部)
-        vertical: 'element-info-top',
-        horizon: 'element-info-left',
-        top: containerTop - height,
-        left: containerRight - width,
-        isExternal: true,
-      },
-      // 内部位置
-      {
-        // 右下方(内部)
-        vertical: 'element-info-bottom-inner',
-        horizon: 'element-info-right',
-        top: containerBottom - height,
-        left: containerLeft,
-        isExternal: false,
-      },
-      {
-        // 左下方(内部)
-        vertical: 'element-info-bottom-inner',
-        horizon: 'element-info-left',
-        top: containerBottom - height,
-        left: containerRight - width,
-        isExternal: false,
-      },
-      {
-        // 右上方(内部)
-        vertical: 'element-info-top-inner',
-        horizon: 'element-info-right',
-        top: containerTop,
-        left: containerLeft,
-        isExternal: false,
-      },
-      {
-        // 左上方(内部)
-        vertical: 'element-info-top-inner',
-        horizon: 'element-info-left',
-        top: containerTop,
-        left: containerRight - width,
-        isExternal: false,
-      },
-      // 超出屏幕
-      {
-        // 左上方(屏幕内)
-        vertical: 'element-info-top-inner',
-        horizon: 'element-info-left',
-        top: Math.max(0, containerTop),
-        left: containerRight - width,
-        isExternal: false,
+    if (!this.elementInfoRef) {
+      return {
+        vertical: '',
+        horizon: '',
         additionStyle: {
-          transform: `translateY(${Math.max(0, -containerTop)}px)`,
+          position: 'fixed',
+          left: '8px',
+          top: '8px',
+          '--ci-panel-max-height': 'calc(100vh - 16px)',
         },
-      },
-      {
-        // 右上方(屏幕内)
-        vertical: 'element-info-top-inner',
-        horizon: 'element-info-right',
-        top: Math.max(0, containerTop),
-        left: containerRight - width,
-        isExternal: false,
-        additionStyle: {
-          transform: `translateY(${Math.max(0, -containerTop)}px)`,
-        },
-      },
-    ];
-
-    let bestPos: (typeof positions)[number] | null = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
-
-    for (const pos of positions) {
-      const { translateX, translateY } = this.getViewportClamp(
-        pos.left,
-        pos.top,
-        width,
-        height,
-        browserWidth,
-        browserHeight
-      );
-      const distance = Math.abs(translateX) + Math.abs(translateY);
-      const transformParts: string[] = [];
-      if (pos.vertical === 'element-info-top') {
-        transformParts.push('translateY(-100%)');
-      }
-      if (pos.additionStyle?.transform) {
-        transformParts.push(pos.additionStyle.transform.trim());
-      }
-      if (translateX !== 0 || translateY !== 0) {
-        transformParts.push(`translate(${translateX}px, ${translateY}px)`);
-      }
-      const transform = transformParts.join(' ').trim();
-      const additionStyle = transform
-        ? { ...pos.additionStyle, transform }
-        : pos.additionStyle;
-      const nextPos = { ...pos, additionStyle };
-
-      if (distance === 0) {
-        return nextPos;
-      }
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestPos = nextPos;
-      }
+      };
     }
-    // 如果所有位置都需要调整，返回偏移量最小的一个
-    return bestPos || positions[0];
+    const floatingRect = this.elementInfoRef.getBoundingClientRect();
+
+    const referenceRect = {
+      x: left - marginLeft,
+      y: top - marginTop,
+      top: top - marginTop,
+      left: left - marginLeft,
+      right: right + marginRight,
+      bottom: bottom + marginBottom,
+      width: width + marginLeft + marginRight,
+      height: height + marginTop + marginBottom,
+    };
+    const reference: VirtualElement = {
+      getBoundingClientRect: () => referenceRect,
+      contextElement: target,
+    };
+    const fallbackPlacements: Placement[] = [
+      'bottom-end',
+      'top-start',
+      'top-end',
+    ];
+    let panelMaxHeight = 'calc(100vh - 16px)';
+    const { x, y } = await computePosition(reference, this.elementInfoRef, {
+      strategy: 'fixed',
+      placement: 'bottom-start',
+      middleware: [
+        offset(8),
+        flip({
+          padding: 8,
+          fallbackPlacements,
+        }),
+        shift({
+          padding: 8,
+        }),
+        size({
+          padding: 8,
+          apply({ availableHeight }) {
+            panelMaxHeight = `${Math.max(180, Math.floor(availableHeight))}px`;
+          },
+        }),
+      ],
+    });
+    const viewport = this.getViewportBounds();
+    const minViewportPadding = 8;
+    const maxX = Math.max(
+      viewport.left + minViewportPadding,
+      viewport.left + viewport.width - floatingRect.width - minViewportPadding
+    );
+    const maxY = Math.max(
+      viewport.top + minViewportPadding,
+      viewport.top + viewport.height - floatingRect.height - minViewportPadding
+    );
+    const clampedX = Math.min(
+      Math.max(x, viewport.left + minViewportPadding),
+      maxX
+    );
+    const clampedY = Math.min(
+      Math.max(y, viewport.top + minViewportPadding),
+      maxY
+    );
+
+    return {
+      vertical: '',
+      horizon: '',
+      additionStyle: {
+        position: 'fixed',
+        left: `${Math.round(clampedX)}px`,
+        top: `${Math.round(clampedY)}px`,
+        right: 'auto',
+        bottom: 'auto',
+        transform: 'none',
+        '--ci-panel-max-height': panelMaxHeight,
+      },
+    };
   };
 
   // 渲染遮罩层
@@ -814,10 +763,14 @@ export class CodeInspectorComponent extends LitElement {
       };
     }
     this.scrollActiveBreadcrumbIntoView();
-    this.agentInputRef?.focus?.();
+    this.syncSelectedContextToServer();
+    if (this.agentUi) {
+      this.agentInputRef?.focus?.();
+    }
   };
 
   private closeChat = () => {
+    this.clearSelectedContextOnServer();
     this.chatOpen = false;
     this.requirement = '';
     this.agentFiles = [];
@@ -870,6 +823,7 @@ export class CodeInspectorComponent extends LitElement {
     if (force !== true && (this.nodeTree || this.chatOpen)) {
       return;
     }
+    this.clearSelectedContextOnServer();
     this.targetNode = null;
     this.show = false;
     this.removeGlobalCursorStyle();
@@ -877,43 +831,60 @@ export class CodeInspectorComponent extends LitElement {
     this.preUserSelect = '';
   };
 
-  renderLayerPanel = (
+  renderLayerPanel = async (
     nodeTree: TreeNode,
     { x, y }: { x: number; y: number }
   ) => {
-    const browserWidth = document.documentElement.clientWidth;
-    const browserHeight = document.documentElement.clientHeight;
-
-    const rightToViewPort = browserWidth - x;
-    const bottomToViewPort = browserHeight - y;
-    let position: Position = {};
-
-    if (rightToViewPort < x) {
-      position['right'] = rightToViewPort + 'px';
-      // 检测是否横向一定超出屏幕
-      if (x < PopperWidth) {
-        position['transform'] = `translateX(${PopperWidth - x}px)`;
-      }
-    } else {
-      position['left'] = x + 'px';
-      // 检测是否横向一定超出屏幕
-      if (rightToViewPort < PopperWidth) {
-        position['transform'] = `translateX(-${
-          PopperWidth - rightToViewPort
-        }px)`;
-      }
-    }
-
-    if (bottomToViewPort < y) {
-      position['bottom'] = bottomToViewPort + 'px';
-      position['maxHeight'] = `${y - POPPER_MARGIN}px`;
-    } else {
-      position['top'] = y + 'px';
-      position['maxHeight'] = `${browserHeight - y - POPPER_MARGIN}px`;
-    }
-    this.nodeTreePosition = position;
     this.nodeTree = nodeTree;
     this.showNodeTree = true;
+    await this.updateComplete;
+    const floating = this.nodeTreeRef;
+    if (!floating) return;
+
+    const referenceRect = {
+      x,
+      y,
+      top: y,
+      left: x,
+      right: x,
+      bottom: y,
+      width: 0,
+      height: 0,
+    };
+    const reference: VirtualElement = {
+      getBoundingClientRect: () => referenceRect,
+    };
+    let maxHeight = '';
+
+    const { x: fx, y: fy } = await computePosition(reference, floating, {
+      strategy: 'fixed',
+      placement: 'right-start',
+      middleware: [
+        offset(8),
+        flip({
+          padding: 8,
+          fallbackPlacements: ['left-start', 'right-end', 'left-end'],
+        }),
+        shift({
+          padding: 8,
+        }),
+        size({
+          padding: 8,
+          apply({ availableHeight }) {
+            maxHeight = `${Math.max(120, Math.floor(availableHeight))}px`;
+          },
+        }),
+      ],
+    });
+
+    this.nodeTreePosition = {
+      left: `${Math.round(fx)}px`,
+      top: `${Math.round(fy)}px`,
+      right: 'auto',
+      bottom: 'auto',
+      transform: 'none',
+      maxHeight,
+    };
   };
 
   removeLayerPanel = () => {
@@ -1006,6 +977,42 @@ export class CodeInspectorComponent extends LitElement {
         detail: this.element,
       })
     );
+  };
+
+  private syncSelectedContextToServer = () => {
+    if (!this.chatOpen || !this.show || !this.element.path) return;
+    const { contextPrompt, dom, domPath } = this.buildClientContextPrompt();
+    const syncKey = `${this.element.path}:${this.element.line}:${this.element.column}:${domPath.length}`;
+    if (syncKey === this.lastSelectedContextSyncKey) return;
+    this.lastSelectedContextSyncKey = syncKey;
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `http://${this.ip}:${this.port}/context/selected`, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(
+      JSON.stringify({
+        filePath: this.element.path,
+        line: this.element.line,
+        column: this.element.column,
+        elementName: this.element.name,
+        dom,
+        domPath,
+        contextPrompt,
+      })
+    );
+    xhr.addEventListener('error', () => {
+      // ignore sync error, do not block inspect workflow
+    });
+  };
+
+  private clearSelectedContextOnServer = () => {
+    this.lastSelectedContextSyncKey = '';
+    const xhr = new XMLHttpRequest();
+    xhr.open('DELETE', `http://${this.ip}:${this.port}/context/selected`, true);
+    xhr.send();
+    xhr.addEventListener('error', () => {
+      // ignore clear error, do not block inspect workflow
+    });
   };
 
   private handleModeShortcut = (e: KeyboardEvent) => {
@@ -1160,6 +1167,20 @@ export class CodeInspectorComponent extends LitElement {
     if (!this.targetNode) {
       return;
     }
+    const nodePath = e.composedPath() as EventTarget[];
+    const inElementInfo = this.elementInfoRef
+      ? nodePath.includes(this.elementInfoRef)
+      : false;
+    const inAgentLog = this.agentLogRef ? nodePath.includes(this.agentLogRef) : false;
+    const inNodeTree = this.nodeTreeRef ? nodePath.includes(this.nodeTreeRef) : false;
+    const scrollingInsidePanel =
+      (this.chatOpen && (inElementInfo || inAgentLog)) || inNodeTree;
+    if (scrollingInsidePanel) {
+      return;
+    }
+    if (this.chatOpen || (!this.isTracking(e) && !this.open)) {
+      return;
+    }
     e.stopPropagation();
     e.preventDefault();
 
@@ -1169,8 +1190,7 @@ export class CodeInspectorComponent extends LitElement {
 
     this.wheelThrottling = true;
 
-    const nodePath = e.composedPath() as HTMLElement[];
-    const validNodeList = this.getValidNodeList(nodePath);
+    const validNodeList = this.getValidNodeList(nodePath as HTMLElement[]);
     let targetNodeIndex = validNodeList.findIndex(({ node }) => node === this.targetNode);
     if (targetNodeIndex === -1) {
       this.wheelThrottling = false;
@@ -1380,6 +1400,13 @@ export class CodeInspectorComponent extends LitElement {
   private gotoChildBreadcrumb = () => {
     if (this.breadcrumbIndex >= this.breadcrumb.length - 1) return;
     void this.jumpBreadcrumb(this.breadcrumbIndex + 1);
+  };
+
+  private copyActiveBreadcrumbPath = () => {
+    const activeSource =
+      this.breadcrumb[this.breadcrumbIndex] || this.element;
+    if (!activeSource?.path) return;
+    this.copyToClipboard(activeSource.path);
   };
 
   private gotoPrevComponentBreadcrumb = () => {
@@ -2141,14 +2168,16 @@ export class CodeInspectorComponent extends LitElement {
   };
 
   private handleAgentAttachClick = () => {
-    if (this.agentLoading) return;
+    if (!this.agentUi || this.agentLoading) return;
     this.agentFileInputRef?.click();
   };
 
-  private handleAgentFilesSelected = async (event: Event) => {
-    const input = event.target as HTMLInputElement;
-    const files = Array.from(input.files || []);
-    input.value = '';
+  private buildPastedFileName = (type: string, index: number) => {
+    const ext = type.split('/')[1] || 'png';
+    return `pasted-image-${Date.now()}-${index + 1}.${ext}`;
+  };
+
+  private appendAgentFiles = async (files: File[]) => {
     if (!files.length) return;
 
     const maxFiles = this.agentUi?.maxFiles ?? 6;
@@ -2161,14 +2190,17 @@ export class CodeInspectorComponent extends LitElement {
 
     let estimatedTotal = currentEstimated;
     const nextFiles: AgentAttachment[] = [];
-    for (const file of files) {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
       if (this.agentFiles.length + nextFiles.length >= maxFiles) {
         this.showNotification(`最多上传 ${maxFiles} 个附件`, 'error');
         break;
       }
+      const fileName =
+        file.name || this.buildPastedFileName(file.type || 'image/png', index);
       if (file.size > maxFileSize) {
         this.showNotification(
-          `${file.name} 超过大小限制（${this.formatAgentFileSize(
+          `${fileName} 超过大小限制（${this.formatAgentFileSize(
             maxFileSize
           )}）`,
           'error'
@@ -2207,7 +2239,7 @@ export class CodeInspectorComponent extends LitElement {
         }
         nextFiles.push({
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          name: file.name,
+          name: fileName,
           type: file.type,
           size: file.size,
           isImage,
@@ -2215,13 +2247,35 @@ export class CodeInspectorComponent extends LitElement {
           text,
         });
       } catch (error) {
-        this.showNotification(`${file.name} 读取失败`, 'error');
+        this.showNotification(`${fileName} 读取失败`, 'error');
       }
     }
 
     if (nextFiles.length) {
       this.agentFiles = [...this.agentFiles, ...nextFiles];
     }
+  };
+
+  private handleAgentFilesSelected = async (event: Event) => {
+    const input = event.target as HTMLInputElement;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    await this.appendAgentFiles(files);
+  };
+
+  private handleAgentPaste = async (event: ClipboardEvent) => {
+    if (!this.agentUi || this.agentLoading || this.agentUi.enableUpload === false) return;
+
+    const items = Array.from(event.clipboardData?.items || []);
+    const imageFiles = items
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+
+    if (!imageFiles.length) return;
+
+    event.preventDefault();
+    await this.appendAgentFiles(imageFiles);
   };
 
   private removeAgentFile = (id: string) => {
@@ -2292,9 +2346,9 @@ export class CodeInspectorComponent extends LitElement {
     const domLabel = [tagName, firstClass].filter(Boolean).join('.');
 
     const contextPrompt =
-      `当前选中的元素对应的 DOM 元素为: ${domLabel}，className为: ${className}，纯文字内容为: ${text}。` +
-      `\n在代码中的定位为 ${elementLoc}，对应的 JSX/TSX 标签为 <${this.element.name} ...>。` +
-      `\n从根节点到选中节点的路径为: ${domPathLabels}。`;
+      `The selected DOM element is: ${domLabel || tagName || this.element.name}, className: ${className || '(none)'}, text content: ${text || '(empty)'}.` +
+      `\nIts source location is ${elementLoc}, and the corresponding JSX/TSX tag is <${this.element.name} ...>.` +
+      `\nThe path from the root node to the selected node is: ${domPathLabels || '(empty)'}.`;
 
     return {
       contextPrompt,
@@ -2325,6 +2379,7 @@ export class CodeInspectorComponent extends LitElement {
     this.agentAbortController = controller;
 
     const { contextPrompt, dom, domPath } = this.buildClientContextPrompt();
+    this.syncSelectedContextToServer();
     const payload = {
       requirement,
       contextPrompt,
@@ -2691,9 +2746,20 @@ export class CodeInspectorComponent extends LitElement {
 
     // Attach all event listeners
     this.attachEventListeners();
+    window.addEventListener('resize', this.handleViewportChange, true);
+    window.addEventListener('scroll', this.handleViewportChange, true);
+    window.visualViewport?.addEventListener('resize', this.handleViewportChange);
+    window.visualViewport?.addEventListener('scroll', this.handleViewportChange);
+    if (typeof ResizeObserver !== 'undefined') {
+      this.elementInfoResizeObserver = new ResizeObserver(() => {
+        this.scheduleElementInfoReposition();
+      });
+      this.elementInfoResizeObserver.observe(this.elementInfoRef);
+    }
   }
 
   disconnectedCallback(): void {
+    this.detachEventListeners();
     window.removeEventListener('mousemove', this.handleMouseMove, true);
     window.removeEventListener('touchmove', this.handleMouseMove, true);
     window.removeEventListener('mousemove', this.handleDrag, true);
@@ -2709,6 +2775,8 @@ export class CodeInspectorComponent extends LitElement {
     window.removeEventListener('wheel', this.handleWheel, { passive: false } as EventListenerOptions);
     window.removeEventListener('resize', this.handleViewportChange, true);
     window.removeEventListener('scroll', this.handleViewportChange, true);
+    window.visualViewport?.removeEventListener('resize', this.handleViewportChange);
+    window.visualViewport?.removeEventListener('scroll', this.handleViewportChange);
     this.elementInfoResizeObserver?.disconnect();
   }
 
@@ -3046,6 +3114,18 @@ export class CodeInspectorComponent extends LitElement {
     const agentUi = this.agentUi || {};
     const providerOptions = agentUi.providers || [];
     const modeOptions = agentUi.modes || [];
+    const hasAgentConfig = !!this.agentUi;
+    const showAgentComposer = this.chatOpen && hasAgentConfig;
+    const elementInfoWidth = this.chatOpen
+      ? hasAgentConfig
+        ? 520
+        : PopperWidth
+      : PopperWidth;
+    const elementInfoContentClass = this.chatOpen
+      ? hasAgentConfig
+        ? 'ci-panel'
+        : 'ci-panel-compact'
+      : 'ci-tip';
     const activeProvider = this.getAgentOptionLabel(
       providerOptions,
       this.agentProvider
@@ -3054,7 +3134,7 @@ export class CodeInspectorComponent extends LitElement {
       modeOptions,
       this.agentMode
     );
-    const canUpload = agentUi.enableUpload !== false;
+    const canUpload = hasAgentConfig && agentUi.enableUpload !== false;
     const placeholder =
       agentUi.placeholder || 'What would you like to know?';
     const canSend =
@@ -3137,137 +3217,178 @@ export class CodeInspectorComponent extends LitElement {
           class="element-info ${this.elementTipStyle.vertical} ${this
             .elementTipStyle.horizon} ${this.elementTipStyle.visibility}"
           style=${styleMap({
-            width: (this.chatOpen ? 520 : PopperWidth) + 'px',
-            maxWidth: '100vw',
+            width: `${elementInfoWidth}px`,
+            maxWidth: 'calc(100vw - 16px)',
             ...this.elementTipStyle.additionStyle,
           })}
         >
           <div
-            class="element-info-content ${this.chatOpen ? 'ci-panel' : 'ci-tip'}"
+            class="element-info-content ${elementInfoContentClass}"
           >
             ${this.chatOpen
               ? html`
-                  <div class="ci-breadcrumb-row">
-                    <div class="ci-breadcrumb-scroll">
-                      ${this.getBreadcrumbDisplayParts().map((part, i, arr) =>
-                        part.kind === 'ellipsis'
-                          ? html`
-                              <span class="ci-ellipsis" title="已省略">…</span>
-                              ${i < arr.length - 1
-                                ? html`<span class="ci-sep">›</span>`
-                                : ''}
-                            `
-                          : html`
-                              <span
-                                class="ci-crumb ${part.index ===
-                                this.breadcrumbIndex
-                                  ? 'active'
-                                  : ''}"
-                                data-index="${part.index}"
-                                title="${part.node.path}:${part.node.line}:${part.node.column}"
-                                @click="${(e: MouseEvent) =>
-                                  this.handleBreadcrumbClick(part.index, e)}"
-                                >${part.node.name}</span
-                              >
-                              ${i < arr.length - 1
-                                ? html`<span class="ci-sep">›</span>`
-                                : ''}
-                            `
-                      )}
-                    </div>
-                    <div class="ci-breadcrumb-controls">
-                      <span
-                        class="ci-arrow ci-arrow-up ${!hasPrevComponent
-                          ? 'disabled'
-                          : ''}"
-                        title="上一个组件"
-                        @click="${this.gotoPrevComponentBreadcrumb}"
-                        >${html`<svg
-                          width="12"
-                          height="12"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
+                  <div class="ci-breadcrumb-header">
+                    <div class="ci-breadcrumb-main">
+                      <div class="ci-breadcrumb-left">
+                        <div class="ci-breadcrumb-row">
+                          <div class="ci-breadcrumb-scroll">
+                            ${this.getBreadcrumbDisplayParts().map((part, i, arr) =>
+                              part.kind === 'ellipsis'
+                                ? html`
+                                    <span class="ci-ellipsis" title="已省略">…</span>
+                                    ${i < arr.length - 1
+                                      ? html`<span class="ci-sep">›</span>`
+                                      : ''}
+                                  `
+                                : html`
+                                    <span
+                                      class="ci-crumb ${part.index ===
+                                      this.breadcrumbIndex
+                                        ? 'active'
+                                        : ''}"
+                                      data-index="${part.index}"
+                                      title="${part.node.path}:${part.node.line}:${part.node.column}"
+                                      @click="${(e: MouseEvent) =>
+                                        this.handleBreadcrumbClick(part.index, e)}"
+                                      >${part.node.name}</span
+                                    >
+                                    ${i < arr.length - 1
+                                      ? html`<span class="ci-sep">›</span>`
+                                      : ''}
+                                  `
+                            )}
+                          </div>
+                        </div>
+                        <div class="ci-breadcrumb-actions">
+                          <button
+                            type="button"
+                            class="ci-copy-action"
+                            aria-label="Copy current path"
+                            title="复制当前路径"
+                            @click="${this.copyActiveBreadcrumbPath}"
+                          >
+                            ${html`<svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              xmlns="http://www.w3.org/2000/svg"
+                            >
+                              <rect
+                                x="9"
+                                y="9"
+                                width="10"
+                                height="10"
+                                rx="2"
+                                stroke="currentColor"
+                                stroke-width="1.8"
+                              />
+                              <path
+                                d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"
+                                stroke="currentColor"
+                                stroke-width="1.8"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                              />
+                            </svg>`}
+                          </button>
+                        </div>
+                      </div>
+                      <div class="ci-breadcrumb-controls">
+                        <span
+                          class="ci-arrow ci-arrow-up ${!hasPrevComponent
+                            ? 'disabled'
+                            : ''}"
+                          title="上一个组件"
+                          @click="${this.gotoPrevComponentBreadcrumb}"
+                          >${html`<svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                          >
+                            <path
+                              d="M8 15l4-4 4 4"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          </svg>`}</span
                         >
-                          <path
-                            d="M8 15l4-4 4 4"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                          />
-                        </svg>`}</span
-                      >
-                      <span
-                        class="ci-arrow ci-arrow-down ${!hasNextComponent
-                          ? 'disabled'
-                          : ''}"
-                        title="下一个组件"
-                        @click="${this.gotoNextComponentBreadcrumb}"
-                        >${html`<svg
-                          width="12"
-                          height="12"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
+                        <span
+                          class="ci-arrow ci-arrow-down ${!hasNextComponent
+                            ? 'disabled'
+                            : ''}"
+                          title="下一个组件"
+                          @click="${this.gotoNextComponentBreadcrumb}"
+                          >${html`<svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                          >
+                            <path
+                              d="M8 9l4 4 4-4"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          </svg>`}</span
                         >
-                          <path
-                            d="M8 9l4 4 4-4"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                          />
-                        </svg>`}</span
-                      >
-                      <span
-                        class="ci-arrow ci-arrow-left ${this.breadcrumbIndex <= 0
-                          ? 'disabled'
-                          : ''}"
-                        title="上一层"
-                        @click="${this.gotoParentBreadcrumb}"
-                        >${html`<svg
-                          width="12"
-                          height="12"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
+                        <span
+                          class="ci-arrow ci-arrow-left ${this.breadcrumbIndex <= 0
+                            ? 'disabled'
+                            : ''}"
+                          title="上一层"
+                          @click="${this.gotoParentBreadcrumb}"
+                          >${html`<svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                          >
+                            <path
+                              d="M15 8l-4 4 4 4"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          </svg>`}</span
                         >
-                          <path
-                            d="M15 8l-4 4 4 4"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                          />
-                        </svg>`}</span
-                      >
-                      <span
-                        class="ci-arrow ci-arrow-right ${this.breadcrumbIndex >=
-                        this.breadcrumb.length - 1
-                          ? 'disabled'
-                          : ''}"
-                        title="下一层"
-                        @click="${this.gotoChildBreadcrumb}"
-                        >${html`<svg
-                          width="12"
-                          height="12"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
+                        <span
+                          class="ci-arrow ci-arrow-right ${this.breadcrumbIndex >=
+                          this.breadcrumb.length - 1
+                            ? 'disabled'
+                            : ''}"
+                          title="下一层"
+                          @click="${this.gotoChildBreadcrumb}"
+                          >${html`<svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                          >
+                            <path
+                              d="M9 8l4 4-4 4"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          </svg>`}</span
                         >
-                          <path
-                            d="M9 8l4 4-4 4"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                          />
-                        </svg>`}</span
-                      >
+                      </div>
                     </div>
                   </div>
-                  <div class="ci-agent">
+                  ${showAgentComposer
+                    ? html`<div class="ci-agent">
                     <div class="ci-agent-box">
                       <textarea
                         id="ci-agent-input"
@@ -3279,6 +3400,7 @@ export class CodeInspectorComponent extends LitElement {
                             e.target as HTMLTextAreaElement
                           ).value;
                         }}"
+                        @paste="${this.handleAgentPaste}"
                         @keydown="${(e: KeyboardEvent) => {
                           const isSubmit =
                             (e.ctrlKey || e.metaKey) && e.key === 'Enter';
@@ -3288,7 +3410,7 @@ export class CodeInspectorComponent extends LitElement {
                           }
                         }}"
                       ></textarea>
-                      ${this.agentFiles.length
+                      ${canUpload && this.agentFiles.length
                         ? html`<div class="ci-agent-attachments">
                             ${this.agentFiles.map(
                               (file) => html`
@@ -3695,7 +3817,8 @@ export class CodeInspectorComponent extends LitElement {
                           </div>
                         </div>`
                       : ''}
-                  </div>
+                  </div>`
+                    : ''}
                 `
               : html`<span class="ci-tip-tag">${this.element.name}</span>`}
           </div>
@@ -3964,20 +4087,48 @@ export class CodeInspectorComponent extends LitElement {
       padding: 10px 12px;
       border-radius: 12px;
     }
+    .ci-panel-compact {
+      padding: 10px 12px;
+      border-radius: 12px;
+    }
     .element-info-content.ci-panel {
-      max-height: calc(100vh - 16px);
+      max-height: var(--ci-panel-max-height, calc(100vh - 16px));
       overflow: auto;
     }
+    .element-info-content.ci-panel-compact {
+      overflow: visible;
+    }
     .ci-panel,
-    .ci-panel * {
+    .ci-panel *,
+    .ci-panel-compact,
+    .ci-panel-compact * {
       pointer-events: auto;
+    }
+    .ci-breadcrumb-header {
+      padding-bottom: 8px;
+      border-bottom: 1px solid #f2f3f5;
+    }
+    .ci-breadcrumb-main {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .ci-breadcrumb-left {
+      min-width: 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
     }
     .ci-breadcrumb-row {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid #f2f3f5;
+      min-height: 30px;
+    }
+    .ci-breadcrumb-actions {
+      display: flex;
+      justify-content: flex-start;
+      margin-top: 2px;
     }
     .ci-breadcrumb-scroll {
       flex: 1;
@@ -4033,14 +4184,14 @@ export class CodeInspectorComponent extends LitElement {
     }
     .ci-breadcrumb-controls {
       position: relative;
-      width: 58px;
-      height: 58px;
+      width: 64px;
+      height: 64px;
       flex-shrink: 0;
     }
     .ci-arrow {
       position: absolute;
-      width: 18px;
-      height: 18px;
+      width: 24px;
+      height: 24px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -4048,13 +4199,17 @@ export class CodeInspectorComponent extends LitElement {
       cursor: pointer;
       border-radius: 999px;
       user-select: none;
-      background: rgba(0, 0, 0, 0.03);
-      border: 1px solid rgba(0, 0, 0, 0.05);
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      box-shadow:
+        0 4px 14px rgba(15, 23, 42, 0.08),
+        0 1px 2px rgba(15, 23, 42, 0.06);
+      backdrop-filter: blur(8px);
     }
     .ci-arrow:hover {
-      background: rgba(0, 0, 0, 0.08);
+      background: #fff;
       color: #1d2129;
+      border-color: rgba(15, 23, 42, 0.12);
     }
     .ci-arrow-up {
       top: 0;
@@ -4080,6 +4235,35 @@ export class CodeInspectorComponent extends LitElement {
       opacity: 0.35;
       cursor: not-allowed;
       pointer-events: none;
+    }
+    .ci-copy-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
+      padding: 0;
+      border-radius: 8px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: rgba(255, 255, 255, 0.96);
+      color: #5b6475;
+      cursor: pointer;
+      box-shadow:
+        0 4px 12px rgba(15, 23, 42, 0.08),
+        0 1px 2px rgba(15, 23, 42, 0.04);
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    .ci-copy-action:hover {
+      color: #2457d6;
+      border-color: rgba(36, 87, 214, 0.18);
+      background: rgba(245, 249, 255, 0.98);
+    }
+    .ci-copy-action svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
     }
     .ci-agent {
       display: flex;

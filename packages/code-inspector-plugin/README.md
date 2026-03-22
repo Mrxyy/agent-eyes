@@ -1,401 +1,361 @@
 <div align="center">
-<img src="https://github.com/zh-lx/code-inspector/assets/73059627/842c3e88-dca7-4743-854c-d61093d3d34f" width="160px" style="margin-bottom: 12px;" />
-
-<p align="center">
-  <h2>code-inspector</h2>
-  <a href="https://inspector.fe-dev.cn">中文文档</a> | <a href="https://inspector.fe-dev.cn/en">Documentation</a>
+<p style="font-size: 20px;">
+  <code><del>“帮我把首页左上角那个蓝色按钮改成品牌主色，hover 再浅一点，文字别动。”</del></code> 👉 改成品牌主色、hover 再浅一点
 </p>
-
-[![NPM version](https://img.shields.io/npm/v/code-inspector-plugin.svg)](https://www.npmjs.com/package/code-inspector-plugin)
-[![GITHUB star](https://img.shields.io/github/stars/zh-lx/code-inspector?style=flat&label=%E2%AD%90%EF%B8%8F%20stars)](https://github.com/zh-lx/code-inspector)
-[![NPM Downloads](https://img.shields.io/npm/dm/code-inspector-plugin.svg)](https://npmcharts.netlify.app/compare/code-inspector-plugin?minimal=true)
-[![MIT-license](https://img.shields.io/npm/l/code-inspector.svg)](https://opensource.org/licenses/MIT)
-[![GITHUB-language](https://img.shields.io/github/languages/top/zh-lx/code-inspector?logoColor=purple&color=purple)](https://github.com/zh-lx/code-inspector)
+<h2>Agent Eyes</h2>
+<p><strong>给 AI Agent 一双眼睛，让它看见你指的是哪里</strong></p>
 
 </div>
 
 <hr />
 
-## 📖 Introduction
+## 为什么需要 Agent Eyes？
 
-Click the element on the page, it can automatically open the code editor and position the cursor to the source code of the element.
+Agent Eyes 把冗长、容易歧义的页面描述，变成 Agent 可以直接执行的精确上下文。
+
+当你在页面上选中一个元素时，Agent Eyes 会自动采集源码路径、行列号、组件层级、DOM 结构、className 和文本内容，把“你指的是这里”变成 Agent 可直接消费的结构化上下文。
 
 ![code-inspector](https://cdn.jsdelivr.net/gh/zh-lx/static-img/code-inspector/demo.gif)
 
-## 💻 Try it out online
+## 核心特性
 
-- [vue online demo](https://stackblitz.com/edit/vitejs-vite-4pseos?file=vite.config.ts)
-- [react online demo](https://stackblitz.com/edit/vitejs-vite-svtwrr?file=vite.config.ts)
-- [preact online demo](https://stackblitz.com/edit/vitejs-vite-iyawbf?file=vite.config.ts)
-- [solid online demo](https://stackblitz.com/edit/solidjs-templates-6u76jn?file=vite.config.ts)
-- [qwik online demo](https://stackblitz.com/edit/vitejs-vite-antzds?file=vite.config.ts)
-- [svelte online demo](https://stackblitz.com/edit/vitejs-vite-zoncqr?file=vite.config.ts)
-- [astro online demo](https://stackblitz.com/edit/withastro-astro-f5xq1t?file=astro.config.mjs)
+### 指哪打哪：精准的上下文感知
 
-## 🎨 Support
+选中页面元素后，Agent Eyes 自动构建完整的上下文信息：
 
-The following are which compilers, web frameworks and editors we supported now:
+- **源码定位**：精确到文件路径、行号、列号
+- **组件层级**：基于 React Fiber 树解析从根组件到目标元素的完整路径（如 `App > Layout > Sidebar > Button`）
+- **DOM 信息**：标签名、className、文本内容
+- **一键传递**：上下文自动注入 AI 对话，无需手动复制粘贴任何信息
 
-- The following bundlers are currently supported:<br />
-  ✅ webpack<br />
-  ✅ vite<br />
-  ✅ rspack / rsbuild<br />
-  ✅ farm<br />
-  ✅ esbuild<br />
-  ✅ turbopack<br />
-  ✅ mako<br />
-- The following Web frameworks are currently supported:<br />
-  ✅ vue2 / vue3 / nuxt<br />
-  ✅ react / nextjs / umijs<br />
-  ✅ preact<br />
-  ✅ solid<br />
-  ✅ qwik<br />
-  ✅ svelte<br />
-  ✅ astro<br />
-- [Supported editor list](https://github.com/zh-lx/launch-ide?tab=readme-ov-file#-supported-editors) | [and Others](https://inspector.fe-dev.cn/en/guide/ide.html)
+### 内置 AI 对话面板
 
-## 🚀 Install
+直接在浏览器中与 AI 代理对话，选中元素后输入需求即可：
 
-```perl
-npm i code-inspector-plugin -D
-# or
-yarn add code-inspector-plugin -D
-# or
-pnpm add code-inspector-plugin -D
+- 支持 ACP 协议（Claude Code、Codex 等主流 AI 代理）
+- SSE 实时流式输出，实时看到 AI 的思考与操作
+- 支持粘贴图片和上传文件，为 AI 提供更多参考
+- 操作时间线展示：清晰追踪 AI 的每一步读取、搜索、编辑动作
+
+### 多 Agent 接入：Skill 与 MCP
+
+Agent Eyes 不只提供内置对话面板，也提供适配外部 Agent 的两种能力：
+
+- **Codex Skill**：把“先检查插件、再获取当前选中上下文、再执行修改”沉淀成可复用工作流
+- **MCP Server**：把当前选中上下文和 `AGENTS.md` 规则能力暴露成标准 MCP 工具
+- **统一目标**：不管你用内置 Agent、Skill，还是 MCP，核心都是让 Agent 在改代码前先拿到准确的页面上下文
+
+### React 项目增强：Fiber 面包屑导航
+
+这部分是 **React 项目的增强能力**。在 React 页面中，Agent Eyes 会深入 React Fiber，还原更接近真实代码结构的组件层级关系：
+
+- 自动识别 React 组件名（包括 `displayName`、`forwardRef`、`memo` 等）
+- 从目标元素向上追溯完整的组件链路
+
+对于非 React 项目，Agent Eyes 仍然可用，但不会依赖 Fiber，而是回退到基于 DOM 和编译注入信息的定位与层级解析。
+
+### 一键跳转 IDE（经典能力）
+
+点击页面元素，自动打开编辑器并定位到对应源码——这是 code-inspector 的经典能力，依然完整保留。
+
+## 支持范围
+
+**构建工具**：webpack / vite / rspack / rsbuild / esbuild / turbopack / farm / mako
+
+**Web 框架**：Vue 2 / Vue 3 / Nuxt / React / Next.js / UmiJS / Preact / Solid / Qwik / Svelte / Astro
+
+**编辑器**：[支持列表](https://github.com/zh-lx/launch-ide?tab=readme-ov-file#-supported-editors) | [更多](https://inspector.fe-dev.cn/en/guide/ide.html)
+
+## 安装
+
+推荐安装方式：**只下载 `agent-eyes` skill**。  
+skill 会先检查项目里是否已安装 `agent-eyes`，如果没有，会继续引导或帮助完成插件安装，然后再读取当前选中的页面上下文。
+
+把内置 skill 链接或复制到你的 Codex skills 目录：
+
+```bash
+ln -s /absolute/path/to/packages/code-inspector-plugin/skills/agent-eyes ~/.codex/skills/agent-eyes
 ```
 
-## 🌈 Usage
+<details>
+  <summary><b>手动安装</b></summary>
 
-Please check here for more usage information: [code-inspector-plugin configuration](https://inspector.fe-dev.cn/en/guide/start.html#configuration)
+如果你不使用 skill，也可以手动安装并配置 `agent-eyes`。
 
-- 1.Configuring Build Tools
+详细配置请参考：[完整配置文档](https://inspector.fe-dev.cn/en/guide/start.html#configuration)
 
-  <details>
-    <summary>Click to expand configuration about: <b>webpack</b></summary>
-
-  ```js
-  // webpack.config.js
-  const { codeInspectorPlugin } = require('code-inspector-plugin');
-
-  module.exports = () => ({
-    plugins: [
-      codeInspectorPlugin({
-        bundler: 'webpack',
-      }),
-    ],
-  });
-  ```
-
-  </details>
+```bash
+npm i agent-eyes -D
+# or
+yarn add agent-eyes -D
+# or
+pnpm add agent-eyes -D
+```
 
   <details>
-    <summary>Click to expand configuration about: <b>vite</b></summary>
+    <summary><b>构建工具配置</b></summary>
 
-  ```js
-  // vite.config.js
-  import { defineConfig } from 'vite';
-  import { codeInspectorPlugin } from 'code-inspector-plugin';
+以下示例统一使用插件配置项来开启 Agent 能力。最小可用配置通常包括：
 
-  export default defineConfig({
-    plugins: [
-      codeInspectorPlugin({
-        bundler: 'vite',
-      }),
-    ],
-  });
-  ```
+- `bundler`：声明当前构建工具
+- `showSwitch`：在页面上显示开关入口
+- `agent`：配置本地 ACP Agent
 
-  </details>
+一个更完整的配置示例：
 
-  <details>
-    <summary>Click to expand configuration about: <b>rspack</b></summary>
-
-  ```js
-  // rspack.config.js
-  const { codeInspectorPlugin } = require('code-inspector-plugin');
-
-  module.exports = {
-    // other config...
-    plugins: [
-      codeInspectorPlugin({
-        bundler: 'rspack',
-      }),
-      // other plugins...
-    ],
-  };
-  ```
-
-  </details>
-
-  <details>
-    <summary>Click to expand configuration about: <b>rsbuild</b></summary>
-
-  ```js
-  // rsbuild.config.js
-  const { codeInspectorPlugin } = require('code-inspector-plugin');
-
-  module.exports = {
-    // other config...
-    tools: {
-      rspack: {
-        plugins: [
-          codeInspectorPlugin({
-            bundler: 'rspack',
-          }),
-        ],
-      },
+```js
+codeInspectorPlugin({
+  bundler: 'vite',
+  showSwitch: true,
+  agent: {
+    acp: {
+      command: 'codex-acp',
+      args: [],
+      persistSession: true,
     },
-  };
-  ```
+  },
+});
+```
 
-  </details>
+<details>
+  <summary><b>Vite</b></summary>
 
-  <details>
-    <summary>Click to expand configuration about: <b>esbuild</b></summary>
+```js
+// vite.config.js
+import { defineConfig } from 'vite';
+import { codeInspectorPlugin } from 'agent-eyes';
+
+export default defineConfig({
+  plugins: [
+    codeInspectorPlugin({
+      bundler: 'vite',
+      showSwitch: true,
+      agent: {
+        acp: {
+          command: 'codex-acp',
+        },
+      },
+    }),
+  ],
+});
+```
+
+</details>
+
+<details>
+  <summary><b>Webpack</b></summary>
+
+```js
+// webpack.config.js
+const { codeInspectorPlugin } = require('agent-eyes');
+
+module.exports = () => ({
+  plugins: [
+    codeInspectorPlugin({
+      bundler: 'webpack',
+      showSwitch: true,
+      agent: {
+        acp: {
+          command: 'codex-acp',
+        },
+      },
+    }),
+  ],
+});
+```
+
+</details>
+
+<details>
+  <summary><b>Rspack / Rsbuild</b></summary>
+
+```js
+// rspack.config.js
+const { codeInspectorPlugin } = require('agent-eyes');
+
+module.exports = {
+  plugins: [
+    codeInspectorPlugin({
+      bundler: 'rspack',
+      showSwitch: true,
+      agent: {
+        acp: {
+          command: 'codex-acp',
+        },
+      },
+    }),
+  ],
+};
+```
+
+</details>
+
+<details>
+  <summary><b>Next.js</b></summary>
+
+- Next.js (<= 14.x)：
 
   ```js
-  // esbuild.config.js
-  const esbuild = require('esbuild');
-  const { codeInspectorPlugin } = require('code-inspector-plugin');
+  const { codeInspectorPlugin } = require('agent-eyes');
 
-  esbuild.build({
-    // other configs...
-    // [注意] esbuild 中使用时，dev 函数的返回值需自己根据环境判断，本地开发的环境返回 true，线上打包返回 false
-    plugins: [codeInspectorPlugin({ bundler: 'esbuild', dev: () => true })],
-  });
-  ```
-
-  </details>
-
-  <details>
-    <summary>Click to expand configuration about: <b>farm</b></summary>
-
-  ```js
-  // farm.config.js
-  import { defineConfig } from '@farmfe/core';
-  import { codeInspectorPlugin } from 'code-inspector-plugin';
-
-  export default defineConfig({
-    vitePlugins: [
-      codeInspectorPlugin({
-        bundler: 'vite',
-      }),
-      // ...other code
-    ],
-  });
-  ```
-
-  </details>
-
-  <details>
-    <summary>Click to expand configuration about: <b>vue-cli</b></summary>
-
-  ```js
-  // vue.config.js
-  const { codeInspectorPlugin } = require('code-inspector-plugin');
-
-  module.exports = {
-    // ...other code
-    chainWebpack: (config) => {
-      config.plugin('code-inspector-plugin').use(
+  const nextConfig = {
+    webpack: (config, { dev, isServer }) => {
+      config.plugins.push(
         codeInspectorPlugin({
           bundler: 'webpack',
+          showSwitch: true,
+          agent: {
+            acp: {
+              command: 'codex-acp',
+            },
+          },
         })
       );
+      return config;
     },
   };
+
+  module.exports = nextConfig;
   ```
 
-  </details>
-
-  <details>
-    <summary>Click to expand configuration about: <b>nuxt</b></summary>
-
-  - For nuxt3.x :
-
-    ```js
-    // nuxt.config.js
-    import { codeInspectorPlugin } from 'code-inspector-plugin';
-
-    // https://nuxt.com/docs/api/configuration/nuxt-config
-    export default defineNuxtConfig({
-      vite: {
-        plugins: [codeInspectorPlugin({ bundler: 'vite' })],
-      },
-    });
-    ```
-
-  - For nuxt2.x :
-
-    ```js
-    // nuxt.config.js
-    import { codeInspectorPlugin } from 'code-inspector-plugin';
-
-    export default {
-      build: {
-        extend(config) {
-          config.plugins.push(codeInspectorPlugin({ bundler: 'webpack' }));
-          return config;
-        },
-      },
-    };
-    ```
-
-  </details>
-
-  <details>
-    <summary>Click to expand configuration about: <b>next.js</b></summary>
-
-  - For next.js(<= 14.x):
-
-    ```js
-    // next.config.js
-    const { codeInspectorPlugin } = require('code-inspector-plugin');
-
-    const nextConfig = {
-      webpack: (config, { dev, isServer }) => {
-        config.plugins.push(codeInspectorPlugin({ bundler: 'webpack' }));
-        return config;
-      },
-    };
-
-    module.exports = nextConfig;
-    ```
-
-  - For next.js(15.0.x ~ 15.2.x):
-
-    ```js
-    import type { NextConfig } from 'next';
-    import { codeInspectorPlugin } from 'code-inspector-plugin';
-
-    const nextConfig: NextConfig = {
-      experimental: {
-        turbo: {
-          rules: codeInspectorPlugin({
-            bundler: 'turbopack',
-          }),
-        },
-      },
-    };
-
-    export default nextConfig;
-    ```
-
-  - For next.js(>= 15.3.x):
-
-    ```js
-    // next.config.js
-    import type { NextConfig } from 'next';
-    import { codeInspectorPlugin } from 'code-inspector-plugin';
-
-    const nextConfig: NextConfig = {
-      turbopack: {
-        rules: codeInspectorPlugin({
-          bundler: 'turbopack',
-        }),
-      },
-    };
-
-    export default nextConfig;
-    ```
-
-  </details>
-
-  <details>
-    <summary>Click to expand configuration about: <b>umi.js</b></summary>
-
-  - With webpack:
-
-    ```js
-    // umi.config.js or umirc.js
-    import { defineConfig } from '@umijs/max';
-    import { codeInspectorPlugin } from 'code-inspector-plugin';
-
-    export default defineConfig({
-      chainWebpack(memo) {
-        memo.plugin('code-inspector-plugin').use(
-          codeInspectorPlugin({
-            bundler: 'webpack',
-          })
-        );
-      },
-      // other config
-    });
-    ```
-
-  - With mako:
-
-    ```ts
-    // .umirc.ts
-    import { defineConfig } from 'umi';
-    import { codeInspectorPlugin } from 'code-inspector-plugin';
-
-    export default defineConfig({
-      // other config...
-      mako: {
-        plugins: [
-          codeInspectorPlugin({
-            bundler: 'mako',
-          }),
-        ],
-      },
-    });
-    ```
-
-  </details>
-
-  <details>
-    <summary>Click to expand configuration about: <b>astro</b></summary>
+- Next.js (>= 15.3.x)：
 
   ```js
-  // astro.config.mjs
-  import { defineConfig } from 'astro/config';
-  import { codeInspectorPlugin } from 'code-inspector-plugin';
+  import type { NextConfig } from 'next';
+  import { codeInspectorPlugin } from 'agent-eyes';
 
-  export default defineConfig({
-    vite: {
-      plugins: [codeInspectorPlugin({ bundler: 'vite' })],
+  const nextConfig: NextConfig = {
+    turbopack: {
+      rules: codeInspectorPlugin({
+        bundler: 'turbopack',
+        showSwitch: true,
+        agent: {
+          acp: {
+            command: 'codex-acp',
+          },
+        },
+      }),
     },
-  });
+  };
+
+  export default nextConfig;
   ```
+
+</details>
+
+<details>
+  <summary><b>Nuxt</b></summary>
+
+```js
+// nuxt.config.js
+import { codeInspectorPlugin } from 'agent-eyes';
+
+export default defineNuxtConfig({
+  vite: {
+    plugins: [
+      codeInspectorPlugin({
+        bundler: 'vite',
+        showSwitch: true,
+        agent: {
+          acp: {
+            command: 'codex-acp',
+          },
+        },
+      }),
+    ],
+  },
+});
+```
+
+</details>
+
+<details>
+  <summary><b>Esbuild / Farm / UmiJS / Astro</b></summary>
+
+更多构建工具配置请参考 [完整配置文档](https://inspector.fe-dev.cn/en/guide/start.html#configuration)。这些场景同样建议直接在 `codeInspectorPlugin({...})` 中传入 `agent` 配置，而不是通过环境变量单独配置。
+
+</details>
 
   </details>
 
-- 2.Using the function
+</details>
 
-  Now you can enjoy using it!~
+### 使用方式
 
-  When pressing the combination keys on the page, moving the mouse over the page will display a mask layer on the DOM with relevant information. Clicking will automatically open the IDE and position the cursor to the corresponding code location. (The default combination keys for Mac are `Option + Shift`; for Windows, it's `Alt + Shift`, and the browser console will output related combination key prompts)
+1. **启动项目**：以开发模式启动你的前端项目，确保 `agent-eyes` 已生效。
+2. **选中目标元素**：按下组合键（Mac: `Option + Shift`，Windows: `Alt + Shift`），移动鼠标高亮目标元素并点击选中。
+3. **直接定位源码**：如果你只是想快速找到代码，点击后会直接跳转到 IDE 对应位置。
+4. **在内置面板中发起修改**：如果你希望 Agent 直接改代码，保持目标元素处于选中状态，在内置对话面板中输入需求，Agent 会自动携带当前上下文执行。
+5. **在外部 Agent 中使用上下文**：如果你安装了 `agent-eyes` skill，Agent 会优先检查插件并读取当前选中上下文，再据此执行修改。
 
-  <img src="https://cdn.jsdelivr.net/gh/zh-lx/static-img/code-inspector/console-success.png" width="700px" />
+推荐工作流是：先选中，再修改。这样 Agent 拿到的是结构化页面上下文，而不是一段容易产生歧义的自然语言描述。
 
-## 👨‍💻 Contributors
+### AI 代理配置
 
-Special thanks to the contributors of this project:<br />
+AI 代理仅通过插件配置项启用和配置，不再推荐通过环境变量单独配置。
 
-<img src="https://contrib.rocks/image?repo=zh-lx/code-inspector" height="40" />
+请在 `codeInspectorPlugin({...})` 中传入 `agent` 配置，例如指定 ACP 命令、模型、模式以及附加 MCP servers。
 
-## 📧 Communication and Feedback
+### Codex Skill
 
-For any usage issues, please leave a message below my [Twitter](https://twitter.com/zhulxing312147) post or [submit an issue](https://github.com/zh-lx/code-inspector/issues) on Github.
+插件内置了一个可复用 skill，帮助 Agent 先检查项目是否安装 `agent-eyes`，并在执行代码修改前请求“当前选中元素上下文”接口。
 
-For Chinese users, you can join the QQ group `769748484` or add the author's WeiXin account `zhoulx1688888` for consultation and feedback:
+- Skill 路径：`skills/agent-eyes`
+- 核心能力：检查并协助安装插件、请求本地服务上下文接口、归一化字段、拼接为可直接用于下一次 Agent 请求的上下文 Prompt
 
-<div style="display: flex; column-gap: 16px; row-gap: 16px; flex-wrap: wrap;">
-  <img src="https://cdn.jsdelivr.net/gh/zh-lx/static-img/code-inspector/qq-group.png" width="200" height="272" />
-  <img src="https://cdn.jsdelivr.net/gh/zh-lx/static-img/code-inspector/wx-group.jpg" width="200" height="272" />
-  <img src="https://cdn.jsdelivr.net/gh/zh-lx/static-img/code-inspector/wx-qrcode.jpg" width="200" height="272" />
-</div>
+如果你使用 Codex，优先建议安装这个 skill，而不是手动拼接上下文说明。
 
-## 💖 Sponsor
+<details>
+  <summary><b>MCP Server</b></summary>
 
-Sponsoring this project can help the author create better. If you are willing, you can sponsor me through Alipay or WeChatPay:
+如果你的 Agent 不使用 skill，或者你更希望通过标准工具协议接入，可以使用独立 MCP：
 
-<div style="display: flex; column-gap: 16px; row-gap: 16px; flex-wrap: wrap;">
-  <img src="https://cdn.jsdelivr.net/gh/zh-lx/static-img/code-inspector/wxpay.jpg" width="200" height="272" />
-  <img src="https://cdn.jsdelivr.net/gh/zh-lx/static-img/code-inspector/alipay.jpg" width="180" height="272" />
-</div>
+```bash
+pnpm add -D agent-eyes-mcp
+```
 
-## Star History
+本地开发阶段，建议直接使用构建产物配置 MCP：
 
-[![Star History Chart](https://api.star-history.com/svg?repos=zh-lx/code-inspector&type=Date)](https://www.star-history.com/#zh-lx/code-inspector&Date)
+```json
+{
+  "mcpServers": {
+    "agent-eyes": {
+      "command": "node",
+      "args": ["/absolute/path/to/packages/mcp/dist/cli.js"]
+    }
+  }
+}
+```
+
+它提供两个工具：
+
+- `get_selected_context`：读取当前选中的 Agent Eyes 上下文
+- `ensure_agents_rule`：为项目创建或更新 `AGENTS.md` 规则
+
+示例 MCP 配置：
+
+```json
+{
+  "mcpServers": {
+    "agent-eyes": {
+      "command": "npx",
+      "args": ["agent-eyes-mcp"]
+    }
+  }
+}
+```
+
+注意：
+
+- 本地 workspace 开发阶段，不要直接使用 `npx agent-eyes-mcp`，除非该包已经发布到 npm
+- 未发布时请优先使用 `node /absolute/path/to/packages/mcp/dist/cli.js`
+
+</details>
+
+## Acknowledgements
+
+Agent Eyes 基于原项目 [code-inspector](https://github.com/zh-lx/code-inspector) 演进而来，感谢原作者和社区贡献者打下的基础。
+
+## License
+
+[MIT](https://opensource.org/licenses/MIT)

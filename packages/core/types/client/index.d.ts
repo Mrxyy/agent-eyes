@@ -13,9 +13,7 @@ interface ElementTipStyle {
     vertical: string;
     horizon: string;
     visibility: string;
-    additionStyle?: {
-        transform: string;
-    };
+    additionStyle?: Record<string, string | undefined>;
 }
 interface TreeNode extends SourceInfo {
     children: TreeNode[];
@@ -148,17 +146,16 @@ export declare class CodeInspectorComponent extends LitElement {
     agentEvents: AgentStreamEvent[];
     agentLoading: boolean;
     agentError: string;
-    agentReasoning: string;
-    agentActions: string;
-    agentTrace: string;
-    private agentTraceType;
     private agentAbortController;
     private agentEventId;
     private agentToolCallDrafts;
+    private elementInfoResizeObserver?;
+    private elementInfoRepositioning;
     componentChain: ComponentFiberInfo[];
     componentChainIndex: number;
     private componentBreadcrumbsByChain;
     private componentBreadcrumbIndexByChain;
+    private lastSelectedContextSyncKey;
     inspectorSwitchRef: HTMLDivElement;
     codeInspectorContainerRef: HTMLDivElement;
     elementInfoRef: HTMLDivElement;
@@ -177,34 +174,35 @@ export declare class CodeInspectorComponent extends LitElement {
     private eventListeners;
     isTracking: (e: any) => boolean | "";
     getDomPropertyValue: (target: HTMLElement, property: string) => number;
+    private scheduleElementInfoReposition;
+    private handleViewportChange;
+    private getViewportBounds;
     calculateElementInfoPosition: (target: HTMLElement) => Promise<{
         vertical: string;
         horizon: string;
-        top: number;
-        left: number;
-        isExternal: boolean;
-        additionStyle?: undefined;
+        additionStyle: {
+            position: string;
+            left: string;
+            top: string;
+            '--ci-panel-max-height': string;
+            right?: undefined;
+            bottom?: undefined;
+            transform?: undefined;
+        };
     } | {
         vertical: string;
         horizon: string;
-        top: number;
-        left: number;
-        isExternal: boolean;
         additionStyle: {
+            position: string;
+            left: string;
+            top: string;
+            right: string;
+            bottom: string;
             transform: string;
+            '--ci-panel-max-height': string;
         };
     }>;
     renderCover: (target: HTMLElement) => Promise<void>;
-    private parseSourceInfoFromPath;
-    private buildDomBreadcrumb;
-    private getComponentFiberInfo;
-    private findComponentFromDomPath;
-    private buildDomCodeBreadcrumb;
-    private getReactFiberFromDom;
-    private getNearestDomFromFiber;
-    private buildReactBreadcrumb;
-    private trimBreadcrumbByPath;
-    private buildBreadcrumb;
     private pickTargetNode;
     private buildBreadcrumbFromNodePath;
     private buildNodeTreeFromBreadcrumb;
@@ -218,7 +216,7 @@ export declare class CodeInspectorComponent extends LitElement {
     renderLayerPanel: (nodeTree: TreeNode, { x, y }: {
         x: number;
         y: number;
-    }) => void;
+    }) => Promise<void>;
     removeLayerPanel: () => void;
     addGlobalCursorStyle: () => void;
     removeGlobalCursorStyle: () => void;
@@ -226,6 +224,8 @@ export declare class CodeInspectorComponent extends LitElement {
     sendImg: () => void;
     buildTargetUrl: () => string;
     trackCode: () => void;
+    private syncSelectedContextToServer;
+    private clearSelectedContextOnServer;
     private handleModeShortcut;
     showNotification(message: string, type?: 'success' | 'error'): void;
     copyToClipboard(text: string): void;
@@ -247,6 +247,7 @@ export declare class CodeInspectorComponent extends LitElement {
     private handleBreadcrumbClick;
     private gotoParentBreadcrumb;
     private gotoChildBreadcrumb;
+    private copyActiveBreadcrumbPath;
     private gotoPrevComponentBreadcrumb;
     private gotoNextComponentBreadcrumb;
     private rebuildBreadcrumbForComponent;
@@ -291,7 +292,10 @@ export declare class CodeInspectorComponent extends LitElement {
     private readFileAsDataUrl;
     private readFileAsText;
     private handleAgentAttachClick;
+    private buildPastedFileName;
+    private appendAgentFiles;
     private handleAgentFilesSelected;
+    private handleAgentPaste;
     private removeAgentFile;
     private buildAgentFilesPayload;
     private getAgentOptionLabel;

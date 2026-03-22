@@ -1,0 +1,56 @@
+{
+  "name": "agent-eyes-mcp",
+  "version": "0.0.1",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "typings": "./types/index.d.ts",
+  "bin": {
+    "agent-eyes-mcp": "./dist/cli.js"
+  },
+  "repository": "git@github.com:zh-lx/code-inspector.git",
+  "author": "zh-lx <18366276315@163.com>",
+  "license": "MIT",
+  "homepage": "https://inspector.fe-dev.cn/en",
+  "description": "MCP server for Agent Eyes selected context and AGENTS.md setup.",
+  "files": [
+    "dist",
+    "types",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./types/index.d.ts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./types/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "keywords": [
+    "mcp",
+    "agent-eyes",
+    "code-inspector",
+    "model-context-protocol"
+  ],
+  "bugs": {
+    "url": "https://github.com/zh-lx/code-inspector/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.3.3",
+    "typescript": "^5.5.4",
+    "vite": "^4.3.9"
+  },
+  "scripts": {
+    "clear": "rimraf ./dist && rimraf ./types",
+    "build": "node ./scripts/build.mjs",
+    "pub": "pnpm publish",
+    "pub:beta": "pnpm publish --tag beta"
+  }
+}

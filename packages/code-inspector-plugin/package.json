@@ -15,7 +15,8 @@
   },
   "files": [
     "dist",
-    "types"
+    "types",
+    "skills"
   ],
   "exports": {
     ".": {

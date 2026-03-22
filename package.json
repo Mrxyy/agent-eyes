@@ -1,5 +1,5 @@
 {
-  "name": "code-inspector",
+  "name": "agent-eyes",
   "version": "0.0.1",
   "repository": "git@github.com:zh-lx/code-inspector.git",
   "author": "zh-lx <18366276315@163.com>",
@@ -32,8 +32,20 @@
     "version:beta": "node ./scripts/version beta",
     "postinstall": "pnpm build"
   },
-  "private": true,
-  "main": "index.js",
+  "files": [
+    "packages/code-inspector-plugin/dist"
+  ],
+  "exports": {
+    ".": {
+      "import": {
+        "default": "./packages/code-inspector-plugin/dist/index.mjs"
+      },
+      "require": {
+        "default": "./packages/code-inspector-plugin/dist/index.js"
+      }
+    }
+  },
+  "main": "packages/code-inspector-plugin/dist/index.js",
   "devDependencies": {
     "@vitest/coverage-v8": "2.1.4",
     "fs-extra": "^10.0.0",
