@@ -16,7 +16,13 @@ For any task that may modify UI, DOM structure, styles, component behavior, page
 4. Ask the user to open Agent Eyes, select the target element, and keep the selection panel open.
 5. Only after a non-null context is returned may you use that context to locate and modify code precisely.
 
-Use the selected context fields \`filePath\`, \`line\`, \`column\`, \`elementName\`, \`dom\`, and \`domPath\` to anchor the change request.
+Prefer multi-selection fields when available:
+
+- \`activeSelectionId\`
+- \`selections\` / \`contexts\`
+- \`data.active\` and \`data.selections\`
+
+If only single-selection fields exist, use \`filePath\`, \`line\`, \`column\`, \`elementName\`, \`dom\`, and \`domPath\`.
 
 If \`code-inspector-plugin\` is missing:
 
@@ -86,6 +92,52 @@ async function getSelectedContext(baseUrl: string) {
   return response.json();
 }
 
+function normalizeSelectedContextPayload(payload: any) {
+  const topSelections = Array.isArray(payload?.selections) ? payload.selections : [];
+  const topContexts = Array.isArray(payload?.contexts) ? payload.contexts : [];
+  const dataSelections = Array.isArray(payload?.data?.selections)
+    ? payload.data.selections
+    : [];
+  const dataContexts = Array.isArray(payload?.data?.contexts)
+    ? payload.data.contexts
+    : [];
+  const contexts =
+    topContexts.length > 0
+      ? topContexts
+      : topSelections.length > 0
+      ? topSelections
+      : dataContexts.length > 0
+      ? dataContexts
+      : dataSelections.length > 0
+      ? dataSelections
+      : payload?.data?.filePath
+      ? [payload.data]
+      : [];
+  const activeSelectionId = String(
+    payload?.activeSelectionId ||
+      payload?.data?.activeSelectionId ||
+      payload?.active?.id ||
+      payload?.data?.active?.id ||
+      ''
+  );
+  const active =
+    payload?.active ||
+    payload?.data?.active ||
+    contexts.find((item: any) => item?.id && item.id === activeSelectionId) ||
+    payload?.data ||
+    contexts[0] ||
+    null;
+
+  return {
+    ...payload,
+    data: payload?.data ?? active,
+    active,
+    activeSelectionId: activeSelectionId || active?.id || '',
+    contexts,
+    selections: contexts,
+  };
+}
+
 function ensureAgentsRule(rootDir: string) {
   const agentsMeta = getAgentsFileStatus(rootDir);
   let nextContent = '';
@@ -128,14 +180,15 @@ export function createAgentEyesMcpServer() {
     async ({ baseUrl }) => {
       try {
         const payload = await getSelectedContext(baseUrl || DEFAULT_BASE_URL);
+        const normalized = normalizeSelectedContextPayload(payload);
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(payload, null, 2),
+              text: JSON.stringify(normalized, null, 2),
             },
           ],
-          structuredContent: payload,
+          structuredContent: normalized,
         };
       } catch (error) {
         return {

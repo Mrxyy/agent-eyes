@@ -1,11 +1,14 @@
 {
-  "name": "agent-eyes-mcp",
-  "version": "0.0.1",
+  "name": "@agent-eyes/agent-eyes-mcp",
+  "version": "0.0.2",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "typings": "./types/index.d.ts",
   "bin": {
     "agent-eyes-mcp": "./dist/cli.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "repository": "git@github.com:zh-lx/code-inspector.git",
   "author": "zh-lx <18366276315@163.com>",

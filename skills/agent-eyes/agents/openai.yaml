@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Eyes"
+  short_description: "Check plugin install, then fetch selected UI context"
+  default_prompt: "Use this skill to verify code-inspector-plugin is installed, help install it when missing, then request the local Agent Eyes context endpoint and normalize the selected-element context for the next agent request."

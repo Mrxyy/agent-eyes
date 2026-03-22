@@ -42,7 +42,13 @@ For any task that may modify UI, DOM structure, styles, component behavior, page
 4. Ask the user to open Agent Eyes, select the target element, and keep the selection panel open.
 5. Only after a non-null context is returned may you use that context to locate and modify code precisely.
 
-Use the selected context fields \`filePath\`, \`line\`, \`column\`, \`elementName\`, \`dom\`, and \`domPath\` to anchor the change request.
+Prefer multi-selection fields when available:
+
+- \`activeSelectionId\`
+- \`selections\` / \`contexts\`
+- \`data.active\` and \`data.selections\`
+
+If only single-selection fields exist, use \`filePath\`, \`line\`, \`column\`, \`elementName\`, \`dom\`, and \`domPath\`.
 
 If \`code-inspector-plugin\` is missing:
 
@@ -134,6 +140,21 @@ export function createServer(
     ].join('\n\n');
   };
 
+  const buildSelectedContextResponseData = (
+    active: Record<string, any> | null,
+    contexts: Record<string, any>[],
+    activeSelectionId: string
+  ) => {
+    if (!active) return null;
+    return {
+      ...active,
+      active,
+      contexts,
+      selections: contexts,
+      activeSelectionId,
+    };
+  };
+
   const server = http.createServer((req: any, res: any) => {
     void (async () => {
       const corsHeaders = {
@@ -189,6 +210,8 @@ export function createServer(
               success: true,
               data: null,
               selections: [],
+              contexts: [],
+              active: null,
               activeSelectionId: '',
             })
           );
@@ -298,6 +321,8 @@ export function createServer(
                 success: true,
                 data: null,
                 selections: [],
+                contexts: [],
+                active: null,
                 activeSelectionId: '',
               })
             );
@@ -316,6 +341,8 @@ export function createServer(
                 contextPrompt: compositeContextPrompt || activeSelection.contextPrompt,
                 activeContextPrompt: activeSelection.contextPrompt || '',
                 selections: contexts,
+                contexts,
+                active: activeSelection,
                 activeSelectionId: activeSelection?.id || '',
               }
             : null;
@@ -327,8 +354,14 @@ export function createServer(
           res.end(
             JSON.stringify({
               success: true,
-              data: latestSelectedContext,
+              data: buildSelectedContextResponseData(
+                latestSelectedContext,
+                latestSelectedContexts,
+                latestActiveSelectionId
+              ),
               selections: latestSelectedContexts,
+              contexts: latestSelectedContexts,
+              active: latestSelectedContext,
               activeSelectionId: latestActiveSelectionId,
             })
           );
@@ -343,8 +376,14 @@ export function createServer(
           res.end(
             JSON.stringify({
               success: true,
-              data: latestSelectedContext,
+              data: buildSelectedContextResponseData(
+                latestSelectedContext,
+                latestSelectedContexts,
+                latestActiveSelectionId
+              ),
               selections: latestSelectedContexts,
+              contexts: latestSelectedContexts,
+              active: latestSelectedContext,
               activeSelectionId: latestActiveSelectionId,
               message: latestSelectedContext
                 ? ''

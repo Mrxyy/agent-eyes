@@ -1081,6 +1081,10 @@ export class CodeInspectorComponent extends LitElement {
     this.targetNode = null;
     this.anchorNode = null;
     this.show = false;
+    this.elementTipStyle = {
+      ...this.elementTipStyle,
+      visibility: 'hidden',
+    };
     this.removeGlobalCursorStyle();
     document.body.style.userSelect = this.preUserSelect;
     this.preUserSelect = '';
@@ -3602,7 +3606,9 @@ export class CodeInspectorComponent extends LitElement {
         <div
           id="element-info"
           class="element-info ${this.elementTipStyle.vertical} ${this
-            .elementTipStyle.horizon} ${this.elementTipStyle.visibility}"
+            .elementTipStyle.horizon} ${this.show
+            ? this.elementTipStyle.visibility
+            : 'hidden'}"
           style=${styleMap({
             width: `${elementInfoWidth}px`,
             maxWidth: 'calc(100vw - 16px)',

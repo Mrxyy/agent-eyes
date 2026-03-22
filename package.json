@@ -1,6 +1,6 @@
 {
-  "name": "agent-eyes",
-  "version": "0.0.1",
+  "name": "@agent-eyes/agent-eyes",
+  "version": "0.0.2",
   "repository": "git@github.com:zh-lx/code-inspector.git",
   "author": "zh-lx <18366276315@163.com>",
   "license": "MIT",
@@ -18,9 +18,13 @@
   "bugs": {
     "url": "https://github.com/zh-lx/code-inspector/issues"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "vitest run --coverage",
     "build": "pnpm --filter \"./packages/*\" run build",
+    "sync:dist": "node ./scripts/sync-root-dist.mjs",
     "build:docs": "pnpm --filter \"./docs/*\" run docs:build && node ./scripts/zip",
     "deploy:docs": "pnpm build:docs && bash ./deploy.sh",
     "pub": "pnpm --filter \"./packages/*\" run pub",
@@ -30,22 +34,27 @@
     "version:patch": "node ./scripts/version patch",
     "version:prod": "node ./scripts/version prod",
     "version:beta": "node ./scripts/version beta",
+    "prepack": "pnpm build && pnpm sync:dist",
     "postinstall": "pnpm build"
   },
   "files": [
-    "packages/code-inspector-plugin/dist"
+    "dist",
+    "demo.gif",
+    "skills-demo.gif",
+    "README.md",
+    "README.en.md"
   ],
   "exports": {
     ".": {
       "import": {
-        "default": "./packages/code-inspector-plugin/dist/index.mjs"
+        "default": "./dist/index.mjs"
       },
       "require": {
-        "default": "./packages/code-inspector-plugin/dist/index.js"
+        "default": "./dist/index.js"
       }
     }
   },
-  "main": "packages/code-inspector-plugin/dist/index.js",
+  "main": "dist/index.js",
   "devDependencies": {
     "@vitest/coverage-v8": "2.1.4",
     "fs-extra": "^10.0.0",
