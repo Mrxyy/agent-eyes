@@ -61,6 +61,16 @@ describe('removeCover', () => {
       // 验证 preUserSelect 被清空
       expect(component.preUserSelect).toBe('');
     });
+
+    it('should clear selected context on server when cover is removed', () => {
+      const clearSpy = vi
+        .spyOn(component as any, 'clearSelectedContextOnServer')
+        .mockImplementation(() => {});
+
+      component.removeCover();
+
+      expect(clearSpy).toHaveBeenCalled();
+    });
   });
 
   describe('State Changes', () => {
