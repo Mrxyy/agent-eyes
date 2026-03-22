@@ -158,6 +158,43 @@ interface AgentAttachment {
   text?: string;
 }
 
+interface SelectedContextPayload {
+  id: string;
+  filePath: string;
+  line: number;
+  column: number;
+  elementName: string;
+  dom: {
+    tagName: string;
+    firstClass: string;
+    className: string;
+    textContent: string;
+  };
+  domPath: Array<{
+    name: string;
+    label: string;
+    path: string;
+    line: number;
+    column: number;
+  }>;
+  contextPrompt: string;
+  order: number;
+}
+
+interface SelectionContext {
+  id: string;
+  targetNode: HTMLElement | null;
+  anchorNode: HTMLElement | null;
+  element: SourceInfo;
+  breadcrumb: BreadcrumbNode[];
+  breadcrumbIndex: number;
+  componentChain: ComponentFiberInfo[];
+  componentChainIndex: number;
+  componentBreadcrumbsByChain: Record<number, BreadcrumbNode[]>;
+  componentBreadcrumbIndexByChain: Record<number, number>;
+  createdAt: number;
+}
+
 const PopperWidth = 300;
 
 function nextTick() {
@@ -270,6 +307,10 @@ export class CodeInspectorComponent extends LitElement {
   breadcrumb: BreadcrumbNode[] = [];
   @state()
   breadcrumbIndex = 0;
+  @state()
+  selections: SelectionContext[] = [];
+  @state()
+  activeSelectionId = '';
   @state()
   requirement = '';
   @state()
@@ -749,28 +790,39 @@ export class CodeInspectorComponent extends LitElement {
     active?.scrollIntoView({ block: 'nearest', inline: 'center' });
   };
 
-  private openChat = async (nodePath: EventTarget[], dom?: HTMLElement) => {
-    this.chatOpen = true;
-    this.requirement = '';
-    this.resetAgentStream();
-    this.agentLoading = false;
+  private getActiveSelection = () => {
+    if (!this.activeSelectionId) return null;
+    return (
+      this.selections.find((item) => item.id === this.activeSelectionId) || null
+    );
+  };
+
+  private buildSelectionId = (
+    element: SourceInfo,
+    breadcrumb: BreadcrumbNode[]
+  ) => {
+    const tail = breadcrumb
+      .map((item) => `${item.path}:${item.line}:${item.column}:${item.name}`)
+      .join('>');
+    return `${element.path}:${element.line}:${element.column}:${tail}`;
+  };
+
+  private createSelectionFromNodePath = (
+    nodePath: EventTarget[],
+    dom?: HTMLElement
+  ): SelectionContext | null => {
     const targetDom = dom || this.targetNode;
     let componentInfo: ComponentFiberInfo | null = null;
+    let componentChain: ComponentFiberInfo[] = [];
     if (targetDom) {
-      const chain = getComponentFiberInfoList(targetDom);
-      this.componentChain = chain;
-      this.componentChainIndex = 0;
-      componentInfo = chain[0] || null;
-    } else {
-      this.componentChain = [];
-      this.componentChainIndex = 0;
+      componentChain = getComponentFiberInfoList(targetDom);
+      componentInfo = componentChain[0] || null;
     }
+
     let targetNode: HTMLElement | null = null;
+    let breadcrumb: BreadcrumbNode[] = [];
     if (componentInfo) {
-      if (componentInfo.componentDom) {
-        this.targetNode = targetDom;
-      }
-      this.breadcrumb = buildReactFiberBreadcrumb(
+      breadcrumb = buildReactFiberBreadcrumb(
         nodePath,
         targetDom || undefined,
         componentInfo || undefined,
@@ -778,50 +830,192 @@ export class CodeInspectorComponent extends LitElement {
           getSourceInfo: (node) => this.getSourceInfo(node),
           getValidNodeList: (nodes) => this.getValidNodeList(nodes),
           elementPath: this.element?.path,
-          targetNode: this.targetNode,
+          targetNode: targetDom,
         }
       );
+      if (componentInfo.componentDom) {
+        targetNode = targetDom;
+      }
     } else {
       const result = this.buildBreadcrumbFromNodePath(nodePath);
-      this.breadcrumb = result.items;
+      breadcrumb = result.items;
       targetNode = result.targetNode;
-      if (!targetDom && targetNode) {
-        this.targetNode = targetNode;
-      }
     }
-    
-    this.breadcrumbIndex = Math.max(0, this.breadcrumb.length - 1);
-    if (this.componentChain.length > 0) {
-      this.componentBreadcrumbsByChain = {
-        [this.componentChainIndex]: this.breadcrumb,
-      };
-      this.componentBreadcrumbIndexByChain = {
-        [this.componentChainIndex]: this.breadcrumbIndex,
-      };
-    } else {
-      this.componentBreadcrumbsByChain = {};
-      this.componentBreadcrumbIndexByChain = {};
-    }
-    await this.updateComplete;
+
     const activeTarget =
       targetDom ||
       targetNode ||
-      this.targetNode ||
-      this.breadcrumb[this.breadcrumb.length - 1]?.element ||
+      breadcrumb[breadcrumb.length - 1]?.element ||
       null;
-    if (activeTarget && activeTarget !== this.targetNode) {
-      await this.renderCover(activeTarget);
-    } else if (activeTarget) {
-      const { vertical, horizon, additionStyle } =
-        await this.calculateElementInfoPosition(activeTarget);
-      this.elementTipStyle = {
-        vertical,
-        horizon,
-        visibility: 'visible',
-        additionStyle,
-      };
+    const element =
+      (breadcrumb[breadcrumb.length - 1] as SourceInfo | undefined) ||
+      (activeTarget ? this.getSourceInfo(activeTarget) : null);
+    if (!element) {
+      return null;
+    }
+
+    const id = this.buildSelectionId(element, breadcrumb);
+    const breadcrumbIndex = Math.max(0, breadcrumb.length - 1);
+    const componentChainIndex = 0;
+    const componentBreadcrumbsByChain: Record<number, BreadcrumbNode[]> =
+      componentChain.length > 0 ? { [componentChainIndex]: breadcrumb } : {};
+    const componentBreadcrumbIndexByChain: Record<number, number> =
+      componentChain.length > 0
+        ? { [componentChainIndex]: breadcrumbIndex }
+        : {};
+
+    return {
+      id,
+      targetNode: activeTarget,
+      anchorNode: breadcrumb[breadcrumb.length - 1]?.element || activeTarget,
+      element: {
+        name: element.name,
+        path: element.path,
+        line: element.line,
+        column: element.column,
+      },
+      breadcrumb,
+      breadcrumbIndex,
+      componentChain,
+      componentChainIndex,
+      componentBreadcrumbsByChain,
+      componentBreadcrumbIndexByChain,
+      createdAt: Date.now(),
+    };
+  };
+
+  private applySelection = async (
+    selection: SelectionContext,
+    options?: { renderCover?: boolean }
+  ) => {
+    this.activeSelectionId = selection.id;
+    this.targetNode = selection.targetNode;
+    this.anchorNode = selection.anchorNode;
+    this.element = { ...selection.element };
+    this.breadcrumb = [...selection.breadcrumb];
+    this.breadcrumbIndex = selection.breadcrumbIndex;
+    this.componentChain = [...selection.componentChain];
+    this.componentChainIndex = selection.componentChainIndex;
+    this.componentBreadcrumbsByChain = {
+      ...selection.componentBreadcrumbsByChain,
+    };
+    this.componentBreadcrumbIndexByChain = {
+      ...selection.componentBreadcrumbIndexByChain,
+    };
+    if (options?.renderCover === false) {
+      return;
+    }
+    await this.updateComplete;
+    const activeTarget =
+      selection.targetNode ||
+      selection.breadcrumb[selection.breadcrumbIndex]?.element ||
+      selection.breadcrumb[selection.breadcrumb.length - 1]?.element ||
+      null;
+    if (activeTarget) {
+      await this.renderCover(activeTarget, selection.anchorNode || activeTarget);
     }
     this.scrollActiveBreadcrumbIntoView();
+  };
+
+  private persistActiveSelectionState = () => {
+    const activeSelection = this.getActiveSelection();
+    if (!activeSelection) return;
+    const nextSelection: SelectionContext = {
+      ...activeSelection,
+      targetNode: this.targetNode,
+      anchorNode: this.anchorNode,
+      element: { ...this.element },
+      breadcrumb: [...this.breadcrumb],
+      breadcrumbIndex: this.breadcrumbIndex,
+      componentChain: [...this.componentChain],
+      componentChainIndex: this.componentChainIndex,
+      componentBreadcrumbsByChain: {
+        ...this.componentBreadcrumbsByChain,
+      },
+      componentBreadcrumbIndexByChain: {
+        ...this.componentBreadcrumbIndexByChain,
+      },
+    };
+    this.selections = this.selections.map((item) =>
+      item.id === nextSelection.id ? nextSelection : item
+    );
+  };
+
+  private upsertSelection = (selection: SelectionContext, append: boolean) => {
+    const exists = this.selections.some((item) => item.id === selection.id);
+    if (append) {
+      this.selections = exists
+        ? this.selections.map((item) =>
+            item.id === selection.id ? selection : item
+          )
+        : [...this.selections, selection];
+    } else {
+      this.selections = [selection];
+    }
+    this.activeSelectionId = selection.id;
+  };
+
+  private removeSelection = async (selectionId: string) => {
+    const currentIndex = this.selections.findIndex(
+      (item) => item.id === selectionId
+    );
+    if (currentIndex === -1) return;
+    const nextSelections = this.selections.filter(
+      (item) => item.id !== selectionId
+    );
+    this.selections = nextSelections;
+    if (nextSelections.length === 0) {
+      this.activeSelectionId = '';
+      this.closeChat();
+      this.removeCover(true);
+      return;
+    }
+    const fallbackIndex = Math.min(currentIndex, nextSelections.length - 1);
+    await this.applySelection(nextSelections[fallbackIndex]);
+    this.syncSelectedContextToServer();
+  };
+
+  private switchSelection = async (selectionId: string) => {
+    if (selectionId === this.activeSelectionId) return;
+    this.persistActiveSelectionState();
+    const selection =
+      this.selections.find((item) => item.id === selectionId) || null;
+    if (!selection) return;
+    await this.applySelection(selection);
+    this.syncSelectedContextToServer();
+  };
+
+  private isAppendSelectionEvent = (e: MouseEvent | TouchEvent) => {
+    return e instanceof MouseEvent && (e.ctrlKey || e.shiftKey);
+  };
+
+  private getTargetNodeFromComposedPath = (nodePath: EventTarget[]) => {
+    const nodes = nodePath.filter(
+      (n): n is HTMLElement => n instanceof HTMLElement
+    );
+    const validNodeList = this.getValidNodeList(nodes);
+    return this.pickTargetNode(validNodeList);
+  };
+
+  private openChat = async (
+    nodePath: EventTarget[],
+    dom?: HTMLElement,
+    options?: { append?: boolean }
+  ) => {
+    const append = !!options?.append;
+    if (this.chatOpen) {
+      this.persistActiveSelectionState();
+    }
+    this.chatOpen = true;
+    this.requirement = '';
+    this.resetAgentStream();
+    this.agentLoading = false;
+    const selection = this.createSelectionFromNodePath(nodePath, dom);
+    if (!selection) {
+      return;
+    }
+    this.upsertSelection(selection, append);
+    await this.applySelection(selection);
     this.syncSelectedContextToServer();
     if (this.agentUi) {
       this.agentInputRef?.focus?.();
@@ -838,6 +1032,8 @@ export class CodeInspectorComponent extends LitElement {
     this.resetAgentStream();
     this.breadcrumb = [];
     this.breadcrumbIndex = 0;
+    this.selections = [];
+    this.activeSelectionId = '';
     this.componentChain = [];
     this.componentChainIndex = 0;
     this.componentBreadcrumbsByChain = {};
@@ -1040,8 +1236,28 @@ export class CodeInspectorComponent extends LitElement {
 
   private syncSelectedContextToServer = () => {
     if (!this.chatOpen || !this.show || !this.element.path) return;
-    const { contextPrompt, dom, domPath } = this.buildClientContextPrompt();
-    const syncKey = `${this.element.path}:${this.element.line}:${this.element.column}:${domPath.length}`;
+    this.persistActiveSelectionState();
+    const activeSelection =
+      this.getActiveSelection() ||
+      this.createSelectionFromNodePath([], this.targetNode || undefined);
+    if (!activeSelection) return;
+    const activePayload = this.buildSelectedContextPayload(activeSelection, 0);
+    const selections = this.buildAllSelectedContextPayloads();
+    const activeSelectionId = this.activeSelectionId || activePayload.id;
+    const contextPrompt = this.buildCompositeContextPrompt(
+      selections,
+      activeSelectionId
+    );
+    const syncKey = JSON.stringify({
+      activeSelectionId,
+      selections: selections.map((item) => ({
+        id: item.id,
+        filePath: item.filePath,
+        line: item.line,
+        column: item.column,
+        domPathLength: item.domPath.length,
+      })),
+    });
     if (syncKey === this.lastSelectedContextSyncKey) return;
     this.lastSelectedContextSyncKey = syncKey;
 
@@ -1050,13 +1266,17 @@ export class CodeInspectorComponent extends LitElement {
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.send(
       JSON.stringify({
-        filePath: this.element.path,
-        line: this.element.line,
-        column: this.element.column,
-        elementName: this.element.name,
-        dom,
-        domPath,
+        filePath: activePayload.filePath,
+        line: activePayload.line,
+        column: activePayload.column,
+        elementName: activePayload.elementName,
+        dom: activePayload.dom,
+        domPath: activePayload.domPath,
         contextPrompt,
+        activeContextPrompt: activePayload.contextPrompt,
+        id: activePayload.id,
+        selections,
+        activeSelectionId,
       })
     );
     xhr.addEventListener('error', () => {
@@ -1072,6 +1292,59 @@ export class CodeInspectorComponent extends LitElement {
     xhr.addEventListener('error', () => {
       // ignore clear error, do not block inspect workflow
     });
+  };
+
+  private buildSelectedContextPayload = (
+    selection: SelectionContext,
+    order: number
+  ): SelectedContextPayload => {
+    const { contextPrompt, dom, domPath } =
+      this.buildClientContextPrompt(selection);
+    return {
+      id: selection.id,
+      filePath: selection.element.path,
+      line: selection.element.line,
+      column: selection.element.column,
+      elementName: selection.element.name,
+      dom,
+      domPath,
+      contextPrompt,
+      order,
+    };
+  };
+
+  private buildAllSelectedContextPayloads = (): SelectedContextPayload[] => {
+    if (!this.selections.length) return [];
+    return this.selections.map((item, index) =>
+      this.buildSelectedContextPayload(item, index)
+    );
+  };
+
+  private buildCompositeContextPrompt = (
+    selections: SelectedContextPayload[],
+    activeSelectionId: string
+  ) => {
+    if (!selections.length) return '';
+    const lines = selections.map((item, index) => {
+      const isActive = item.id === activeSelectionId;
+      const domLabel = [item.dom.tagName, item.dom.firstClass]
+        .filter(Boolean)
+        .join('.');
+      const pathText = item.domPath
+        .map((node) => `${node.label}(${node.path}:${node.line}:${node.column})`)
+        .join(' > ');
+      return [
+        `${isActive ? '[ACTIVE] ' : ''}Selection #${index + 1}`,
+        `source: ${item.filePath}:${item.line}:${item.column}`,
+        `element: <${item.elementName} ...>`,
+        `dom: ${domLabel || '(unknown)'}, className: ${item.dom.className || '(none)'}`,
+        `path: ${pathText || '(empty)'}`,
+      ].join('\n');
+    });
+    return [
+      `There are ${selections.length} selected DOM contexts. Consider all of them together.`,
+      ...lines,
+    ].join('\n\n');
   };
 
   private handleModeShortcut = (e: KeyboardEvent) => {
@@ -1280,8 +1553,28 @@ export class CodeInspectorComponent extends LitElement {
     const clickedInInfo = composedPath.includes(this.elementInfoRef);
     const clickedInNodeTree = composedPath.includes(this.nodeTreeRef);
     const clickedInSwitch = composedPath.includes(this.inspectorSwitchRef);
+    const appendSelection = this.isAppendSelectionEvent(e);
+    const clickedTargetNode = this.getTargetNodeFromComposedPath(composedPath);
+    const clickedDom =
+      clickedTargetNode || ((e.target as HTMLElement | null) ?? undefined);
 
     if (this.chatOpen) {
+      if (
+        appendSelection &&
+        !clickedInInfo &&
+        !clickedInNodeTree &&
+        !clickedInSwitch &&
+        this.show
+      ) {
+        e.stopPropagation();
+        e.preventDefault();
+        void this.openChat(
+          composedPath,
+          clickedDom,
+          { append: true }
+        );
+        return;
+      }
       if (!clickedInInfo && !clickedInNodeTree && !clickedInSwitch) {
         this.closeChat();
         this.removeCover(true);
@@ -1306,7 +1599,8 @@ export class CodeInspectorComponent extends LitElement {
         e.preventDefault();
         void this.openChat(
           composedPath,
-          (this.targetNode || (e.target as HTMLElement)) ?? undefined
+          clickedDom,
+          { append: appendSelection }
         );
         if (this.autoToggle) {
           this.open = false;
@@ -1438,7 +1732,9 @@ export class CodeInspectorComponent extends LitElement {
     const node = this.breadcrumb[index];
     this.forceOutlineNextCover = true;
     await this.renderCover(node.element);
+    this.persistActiveSelectionState();
     this.scrollActiveBreadcrumbIntoView();
+    this.syncSelectedContextToServer();
   };
 
   private handleBreadcrumbClick = (index: number, e: MouseEvent) => {
@@ -1524,7 +1820,9 @@ export class CodeInspectorComponent extends LitElement {
       this.breadcrumbIndex = Math.max(0, this.breadcrumb.length - 1);
     }
     await this.updateComplete;
+    this.persistActiveSelectionState();
     this.scrollActiveBreadcrumbIntoView();
+    this.syncSelectedContextToServer();
   };
 
   private cancelAgent = () => {
@@ -2388,15 +2686,19 @@ export class CodeInspectorComponent extends LitElement {
     }
   };
 
-  private buildClientContextPrompt = () => {
-    const dom = this.getCurrentAnchorElement();
+  private buildClientContextPrompt = (selection?: SelectionContext) => {
+    const activeSelection =
+      selection || this.getActiveSelection() || null;
+    const element = activeSelection?.element || this.element;
+    const breadcrumb = activeSelection?.breadcrumb || this.breadcrumb;
+    const dom = activeSelection?.anchorNode || this.getCurrentAnchorElement();
     const tagName = dom?.tagName?.toLowerCase?.() || '';
     const firstClass = dom?.classList?.[0] || '';
     const className = (dom as any)?.className || '';
     const textContent = (dom?.textContent || '').trim().replace(/\s+/g, ' ');
     const text = textContent.length > 200 ? `${textContent.slice(0, 200)}…` : textContent;
 
-    const domPath = this.breadcrumb.map((b) => ({
+    const domPath = breadcrumb.map((b) => ({
       name: b.name,
       label: b.name,
       path: b.path,
@@ -2404,13 +2706,17 @@ export class CodeInspectorComponent extends LitElement {
       column: b.column,
     }));
     const domPathLabels = domPath.map((n) => n.label).join(' > ');
-    const elementLoc = `${this.element.path}:${this.element.line}:${this.element.column}`;
+    const domPathWithLocation = domPath
+      .map((n) => `${n.label}(${n.path}:${n.line}:${n.column})`)
+      .join(' > ');
+    const elementLoc = `${element.path}:${element.line}:${element.column}`;
     const domLabel = [tagName, firstClass].filter(Boolean).join('.');
 
     const contextPrompt =
-      `The selected DOM element is: ${domLabel || tagName || this.element.name}, className: ${className || '(none)'}, text content: ${text || '(empty)'}.` +
-      `\nIts source location is ${elementLoc}, and the corresponding JSX/TSX tag is <${this.element.name} ...>.` +
-      `\nThe path from the root node to the selected node is: ${domPathLabels || '(empty)'}.`;
+      `The selected DOM element is: ${domLabel || tagName || element.name}, className: ${className || '(none)'}, text content: ${text || '(empty)'}.` +
+      `\nIts source location is ${elementLoc}, and the corresponding JSX/TSX tag is <${element.name} ...>.` +
+      `\nThe path from the root node to the selected node is: ${domPathLabels || '(empty)'}.` +
+      `\nPath with source locations: ${domPathWithLocation || '(empty)'}.`;
 
     return {
       contextPrompt,
@@ -2440,17 +2746,35 @@ export class CodeInspectorComponent extends LitElement {
     const controller = new AbortController();
     this.agentAbortController = controller;
 
-    const { contextPrompt, dom, domPath } = this.buildClientContextPrompt();
+    this.persistActiveSelectionState();
+    const activeSelection =
+      this.getActiveSelection() ||
+      this.createSelectionFromNodePath([], this.targetNode || undefined);
+    if (!activeSelection) {
+      this.agentLoading = false;
+      return;
+    }
+    const { contextPrompt: activeContextPrompt, dom, domPath } =
+      this.buildClientContextPrompt(activeSelection);
+    const selections = this.buildAllSelectedContextPayloads();
+    const activeSelectionId = this.activeSelectionId || activeSelection.id;
+    const contextPrompt = this.buildCompositeContextPrompt(
+      selections,
+      activeSelectionId
+    );
     this.syncSelectedContextToServer();
     const payload = {
       requirement,
       contextPrompt,
-      file: this.element.path,
-      line: this.element.line,
-      column: this.element.column,
-      elementName: this.element.name,
+      activeContextPrompt,
+      file: activeSelection.element.path,
+      line: activeSelection.element.line,
+      column: activeSelection.element.column,
+      elementName: activeSelection.element.name,
       dom,
       domPath,
+      selections,
+      activeSelectionId,
       model: this.agentProvider || undefined,
       mode: this.agentMode || undefined,
       files: filesPayload.length ? filesPayload : undefined,
@@ -3291,6 +3615,41 @@ export class CodeInspectorComponent extends LitElement {
             ${this.chatOpen
               ? html`
                   <div class="ci-breadcrumb-header">
+                    ${this.selections.length > 0
+                      ? html`<div class="ci-selection-list">
+                          ${this.selections.map(
+                            (selection, index) => html`
+                              <div
+                                class="ci-selection-chip ${selection.id ===
+                                this.activeSelectionId
+                                  ? 'active'
+                                  : ''}"
+                                title="${selection.element.path}:${selection.element.line}:${selection.element.column}"
+                              >
+                                <button
+                                  type="button"
+                                  class="ci-selection-chip-main"
+                                  @click="${() =>
+                                    void this.switchSelection(selection.id)}"
+                                >
+                                  ${index + 1}. ${selection.element.name}
+                                </button>
+                                ${this.selections.length > 1
+                                  ? html`<button
+                                      type="button"
+                                      class="ci-selection-chip-remove"
+                                      title="移除该选中项"
+                                      @click="${() =>
+                                        void this.removeSelection(selection.id)}"
+                                    >
+                                      ×
+                                    </button>`
+                                  : ''}
+                              </div>
+                            `
+                          )}
+                        </div>`
+                      : ''}
                     <div class="ci-breadcrumb-main">
                       <div class="ci-breadcrumb-left">
                         <div class="ci-breadcrumb-row">
@@ -4170,6 +4529,56 @@ export class CodeInspectorComponent extends LitElement {
     .ci-breadcrumb-header {
       padding-bottom: 8px;
       border-bottom: 1px solid #f2f3f5;
+    }
+    .ci-selection-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+      max-height: 84px;
+      overflow: auto;
+    }
+    .ci-selection-chip {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #d9dde4;
+      border-radius: 999px;
+      background: #fff;
+      max-width: 100%;
+      overflow: hidden;
+    }
+    .ci-selection-chip.active {
+      border-color: rgba(0, 106, 255, 0.35);
+      background: rgba(0, 106, 255, 0.08);
+    }
+    .ci-selection-chip-main {
+      border: 0;
+      background: transparent;
+      color: #1d2129;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 20px;
+      padding: 1px 8px 1px 10px;
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ci-selection-chip-remove {
+      border: 0;
+      border-left: 1px solid #e5e6eb;
+      background: transparent;
+      color: #86909c;
+      cursor: pointer;
+      width: 20px;
+      height: 20px;
+      line-height: 20px;
+      padding: 0;
+      text-align: center;
+    }
+    .ci-selection-chip-remove:hover {
+      color: #f53f3f;
+      background: rgba(245, 63, 63, 0.08);
     }
     .ci-breadcrumb-main {
       display: flex;

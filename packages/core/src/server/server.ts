@@ -107,6 +107,32 @@ export function createServer(
   record?: RecordInfo
 ) {
   let latestSelectedContext: Record<string, any> | null = null;
+  let latestSelectedContexts: Record<string, any>[] = [];
+  let latestActiveSelectionId = '';
+  const buildCompositeContextPrompt = (contexts: Record<string, any>[]) => {
+    if (!Array.isArray(contexts) || contexts.length === 0) return '';
+    const items = contexts.map((item, index) => {
+      const domLabel = [item?.dom?.tagName, item?.dom?.firstClass]
+        .filter(Boolean)
+        .join('.');
+      const domPath = Array.isArray(item?.domPath)
+        ? item.domPath.join(' > ')
+        : '';
+      return [
+        `Selection #${index + 1}`,
+        `source: ${item.filePath}:${item.line}:${item.column}`,
+        `element: <${item.elementName || 'unknown'} ...>`,
+        `dom: ${domLabel || '(unknown)'}, className: ${String(
+          item?.dom?.className || ''
+        )}`,
+        `path: ${domPath || '(empty)'}`,
+      ].join('\n');
+    });
+    return [
+      `There are ${contexts.length} selected DOM contexts. Consider all of them together.`,
+      ...items,
+    ].join('\n\n');
+  };
 
   const server = http.createServer((req: any, res: any) => {
     void (async () => {
@@ -152,6 +178,8 @@ export function createServer(
 
         if (req.method === 'DELETE') {
           latestSelectedContext = null;
+          latestSelectedContexts = [];
+          latestActiveSelectionId = '';
           res.writeHead(200, {
             ...corsHeaders,
             'Content-Type': 'application/json; charset=utf-8',
@@ -160,6 +188,8 @@ export function createServer(
             JSON.stringify({
               success: true,
               data: null,
+              selections: [],
+              activeSelectionId: '',
             })
           );
           return;
@@ -189,21 +219,76 @@ export function createServer(
             return;
           }
 
-          const filePath = String(
-            body.filePath || body.file || body.path || body.element?.path || ''
-          );
-          const line = Number(body.line || body.element?.line || 0);
-          const column = Number(body.column || body.element?.column || 0);
-          const elementName = String(
-            body.elementName || body.element?.name || body.element?.elementName || ''
-          );
-          const dom = body.dom || {};
-          const domPath = Array.isArray(body.domPath)
-            ? body.domPath.map((item: any) => item?.label || item?.name || item).filter(Boolean)
+          const normalizeSelectedContext = (input: any, order: number) => {
+            const filePath = String(
+              input?.filePath ||
+                input?.file ||
+                input?.path ||
+                input?.element?.path ||
+                ''
+            );
+            const line = Number(input?.line || input?.element?.line || 0);
+            const column = Number(
+              input?.column || input?.element?.column || 0
+            );
+            const elementName = String(
+              input?.elementName ||
+                input?.element?.name ||
+                input?.element?.elementName ||
+                ''
+            );
+            const dom = input?.dom || {};
+            const domPath = Array.isArray(input?.domPath)
+              ? input.domPath
+                  .map((item: any) => item?.label || item?.name || item)
+                  .filter(Boolean)
+              : [];
+            const contextPrompt = String(
+              input?.contextPrompt || input?.context || ''
+            );
+            const id = String(
+              input?.id || `${filePath}:${line}:${column}:${order}`
+            );
+            if (!filePath) {
+              return null;
+            }
+            return {
+              id,
+              filePath,
+              line,
+              column,
+              elementName,
+              dom: {
+                tagName: String(dom.tagName || ''),
+                firstClass: String(dom.firstClass || ''),
+                className: String(dom.className || ''),
+                textContent: String(dom.textContent || ''),
+              },
+              domPath,
+              contextPrompt,
+              updatedAt: Date.now(),
+            };
+          };
+
+          const contextsFromClient = Array.isArray(body.selections)
+            ? body.selections
+                .map((item: any, index: number) =>
+                  normalizeSelectedContext(item, index)
+                )
+                .filter(Boolean)
             : [];
-          const contextPrompt = String(body.contextPrompt || body.context || '');
-          if (!filePath) {
+          const fallbackContext = normalizeSelectedContext(body, 0);
+          const contexts =
+            contextsFromClient.length > 0
+              ? contextsFromClient
+              : fallbackContext
+              ? [fallbackContext]
+              : [];
+          const activeSelectionIdFromClient = String(body.activeSelectionId || '');
+          if (!contexts.length) {
             latestSelectedContext = null;
+            latestSelectedContexts = [];
+            latestActiveSelectionId = '';
             res.writeHead(200, {
               ...corsHeaders,
               'Content-Type': 'application/json; charset=utf-8',
@@ -212,25 +297,28 @@ export function createServer(
               JSON.stringify({
                 success: true,
                 data: null,
+                selections: [],
+                activeSelectionId: '',
               })
             );
             return;
           }
-          latestSelectedContext = {
-            filePath,
-            line,
-            column,
-            elementName,
-            dom: {
-              tagName: String(dom.tagName || ''),
-              firstClass: String(dom.firstClass || ''),
-              className: String(dom.className || ''),
-              textContent: String(dom.textContent || ''),
-            },
-            domPath,
-            contextPrompt,
-            updatedAt: Date.now(),
-          };
+          const activeSelection =
+            contexts.find((item: any) => item.id === activeSelectionIdFromClient) ||
+            contexts[0] ||
+            null;
+          const compositeContextPrompt = buildCompositeContextPrompt(contexts);
+          latestSelectedContexts = contexts;
+          latestActiveSelectionId = activeSelection?.id || '';
+          latestSelectedContext = activeSelection
+            ? {
+                ...activeSelection,
+                contextPrompt: compositeContextPrompt || activeSelection.contextPrompt,
+                activeContextPrompt: activeSelection.contextPrompt || '',
+                selections: contexts,
+                activeSelectionId: activeSelection?.id || '',
+              }
+            : null;
 
           res.writeHead(200, {
             ...corsHeaders,
@@ -240,6 +328,8 @@ export function createServer(
             JSON.stringify({
               success: true,
               data: latestSelectedContext,
+              selections: latestSelectedContexts,
+              activeSelectionId: latestActiveSelectionId,
             })
           );
           return;
@@ -254,6 +344,8 @@ export function createServer(
             JSON.stringify({
               success: true,
               data: latestSelectedContext,
+              selections: latestSelectedContexts,
+              activeSelectionId: latestActiveSelectionId,
               message: latestSelectedContext
                 ? ''
                 : 'no selected context yet, select an element first',
@@ -402,6 +494,8 @@ export function createServer(
           body.requirement || body.prompt || body.message || '';
         const contextFromClient: string =
           body.contextPrompt || body.context || '';
+        const activeContextFromClient: string =
+          body.activeContextPrompt || '';
         const modelId: string =
           body.model || process.env.CODE_INSPECTOR_ACP_MODEL || undefined;
         const modeId: string = body.mode || body.modeId || undefined;
@@ -434,8 +528,63 @@ export function createServer(
         const domPathLabels = domPath
           .map((n: any) => n?.label || n?.name)
           .filter(Boolean);
+        const selections = Array.isArray(body.selections)
+          ? body.selections
+              .map((item: any, index: number) => {
+                const filePath = String(
+                  item?.filePath || item?.file || item?.path || ''
+                );
+                const selLine = Number(item?.line || 0);
+                const selColumn = Number(item?.column || 0);
+                const selElementName = String(
+                  item?.elementName || item?.name || ''
+                );
+                const selDom = item?.dom || {};
+                const selPathLabels = Array.isArray(item?.domPath)
+                  ? item.domPath
+                      .map((n: any) => n?.label || n?.name)
+                      .filter(Boolean)
+                  : [];
+                if (!filePath) return null;
+                return {
+                  index,
+                  filePath,
+                  line: selLine,
+                  column: selColumn,
+                  elementName: selElementName,
+                  dom: {
+                    tagName: String(selDom.tagName || ''),
+                    firstClass: String(selDom.firstClass || ''),
+                    className: String(selDom.className || ''),
+                    textContent: String(selDom.textContent || ''),
+                  },
+                  domPathLabels: selPathLabels,
+                  contextPrompt: String(item?.contextPrompt || ''),
+                };
+              })
+              .filter(Boolean)
+          : [];
+        const activeSelectionId = String(body.activeSelectionId || '');
+        const activeSelection =
+          selections.find((item: any) => item.id === activeSelectionId) ||
+          selections[0] ||
+          null;
 
-        const targetDomLabel = [dom.tagName, dom.firstClass]
+        if (!file && activeSelection?.filePath) {
+          file = resolveProjectFile(activeSelection.filePath);
+        }
+        const resolvedLine = line || Number(activeSelection?.line || 0);
+        const resolvedColumn = column || Number(activeSelection?.column || 0);
+        const resolvedElementName =
+          elementName || String(activeSelection?.elementName || '');
+        const resolvedDom =
+          dom && Object.keys(dom).length > 0 ? dom : activeSelection?.dom || {};
+        const resolvedDomPathLabels =
+          domPathLabels.length > 0
+            ? domPathLabels
+            : activeSelection?.domPathLabels || [];
+
+        const targetDomLabel = [resolvedDom.tagName, resolvedDom.firstClass]
           .filter(Boolean)
           .join('.');
 
@@ -443,10 +592,10 @@ export function createServer(
         try {
           if (file && fs.existsSync(file)) {
             const content = fs.readFileSync(file, 'utf-8');
-            if (line > 0) {
+            if (resolvedLine > 0) {
               const lines = content.split(/\r?\n/);
-              const start = Math.max(0, line - 1 - 40);
-              const end = Math.min(lines.length, line - 1 + 60);
+              const start = Math.max(0, resolvedLine - 1 - 40);
+              const end = Math.min(lines.length, resolvedLine - 1 + 60);
               snippet = lines
                 .slice(start, end)
                 .map((l, i) => `${start + i + 1}: ${l}`)
@@ -470,14 +619,38 @@ export function createServer(
           return;
         }
 
+        const fallbackSingleContext = `The selected DOM element to modify is: ${targetDomLabel || '(unknown)'}, className: ${String(
+          resolvedDom.className || ''
+        )}, text content: ${String(
+          resolvedDom.textContent || ''
+        )}. Its source starts at line ${resolvedLine}, column ${resolvedColumn} as React element <${resolvedElementName || 'unknown'} ...>. The root DOM on this path is ${
+          resolvedDomPathLabels[0] || '(unknown)'
+        }, and the path from root to selected node is ${JSON.stringify(
+          resolvedDomPathLabels
+        )}.`;
+        const fallbackCompositeContext = selections.length
+          ? selections
+          .map((item: any) => {
+            const label = [item.dom.tagName, item.dom.firstClass]
+              .filter(Boolean)
+              .join('.');
+            const isActive = activeSelection?.id === item.id;
+            return `${isActive ? '[ACTIVE] ' : ''}Selection #${item.index + 1}: ${item.filePath}:${item.line}:${item.column}, ReactElement <${item.elementName || 'unknown'} ...>, DOM ${label || '(unknown)'}, DomPath ${JSON.stringify(item.domPathLabels)}.`;
+          })
+          .join('\n')
+          : '';
         const generatedContext =
           contextFromClient ||
-          `当前选中的元素对应的Dom元素（也就是用户需要修改的地方）为: ${targetDomLabel},className为:${String(
-            dom.className || ''
-          )},纯文字内容为:${String(dom.textContent || '')}。在代码中开始位置为的第${line}行的${column}列的ReactElement为<${elementName}...,该ReactElement对应的根节点dom元素为 ${domPathLabels[0] || ''
-          }。 选中元素与根节点dom之间路径为:${JSON.stringify(domPathLabels)}。`;
+          fallbackCompositeContext ||
+          activeContextFromClient ||
+          fallbackSingleContext;
 
-        const system = `你是一个本地代码修改 Agent。\n- 目标：根据上下文与用户需求，直接修改项目源码以达成需求。\n- 工具：你可以通过 MCP 工具读取/搜索/写入文件并完成修改（如提供了 filesystem MCP）。\n- 约束：尽量最小改动；修改后保证 TypeScript 编译通过。\n- 输出：用简洁中文说明你改了哪些文件/点。\n`;
+        const system = `You are a local code-editing agent.
+- Goal: modify project source code directly according to context and user requirement.
+- Tools: use MCP tools to read/search/write files (for example, filesystem MCP if available).
+- Constraints: keep changes minimal and ensure TypeScript compilation passes.
+- Output: provide a concise summary in English of what files/parts were changed.
+`;
 
         const formatBytes = (bytes: number) => {
           if (!Number.isFinite(bytes) || bytes <= 0) return '';
@@ -493,7 +666,7 @@ export function createServer(
             const type = String(file.type || '');
             const size = Number(file.size || 0);
             const sizeLabel = formatBytes(size);
-            const header = `附件：${name}${
+            const header = `Attachment: ${name}${
               type ? ` (${type}${sizeLabel ? `, ${sizeLabel}` : ''})` : ''
             }`;
             const content =
@@ -505,19 +678,19 @@ export function createServer(
             if (!content) return header;
             const trimmed =
               content.length > maxAttachmentChars
-                ? `${content.slice(0, maxAttachmentChars)}…(已截断)`
+                ? `${content.slice(0, maxAttachmentChars)}…(truncated)`
                 : content;
-            return `${header}\n内容：\n${trimmed}`;
+            return `${header}\nContent:\n${trimmed}`;
           })
           .filter(Boolean)
           .join('\n\n');
-        const requirementText = userRequirement || '请参考附件';
+        const requirementText = userRequirement || 'Please refer to the attachments.';
         const prompt = [
           generatedContext,
-          file ? `\n待修改文件：${file}` : '',
-          snippet ? `\n\n文件片段（含行号）：\n${snippet}` : '',
-          attachmentsContext ? `\n\n用户附件：\n${attachmentsContext}` : '',
-          `\n\n用户需求：\n${requirementText}\n`,
+          file ? `\nTarget file: ${file}` : '',
+          snippet ? `\n\nFile snippet (with line numbers):\n${snippet}` : '',
+          attachmentsContext ? `\n\nUser attachments:\n${attachmentsContext}` : '',
+          `\n\nUser requirement:\n${requirementText}\n`,
         ]
           .filter(Boolean)
           .join('\n');

@@ -183,7 +183,8 @@ export function getWebComponentCode(options: CodeOptions, port: number) {
     agent,
   } = options || ({} as CodeOptions);
   const { locate = true, copy = false, target = '' } = behavior;
-  const agentUi = agent?.ui;
+  // ACP enabled should expose a usable chat UI by default.
+  const agentUi = agent?.ui || (agent?.acp ? {} : null);
   return `
 ;(function (){
   if (typeof window !== 'undefined') {

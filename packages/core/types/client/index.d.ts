@@ -65,6 +65,19 @@ interface AgentAttachment {
     dataUrl?: string;
     text?: string;
 }
+interface SelectionContext {
+    id: string;
+    targetNode: HTMLElement | null;
+    anchorNode: HTMLElement | null;
+    element: SourceInfo;
+    breadcrumb: BreadcrumbNode[];
+    breadcrumbIndex: number;
+    componentChain: ComponentFiberInfo[];
+    componentChainIndex: number;
+    componentBreadcrumbsByChain: Record<number, BreadcrumbNode[]>;
+    componentBreadcrumbIndexByChain: Record<number, number>;
+    createdAt: number;
+}
 export declare class CodeInspectorComponent extends LitElement {
     hotKeys: string;
     port: number;
@@ -137,6 +150,8 @@ export declare class CodeInspectorComponent extends LitElement {
     private forceOutlineNextCover;
     breadcrumb: BreadcrumbNode[];
     breadcrumbIndex: number;
+    selections: SelectionContext[];
+    activeSelectionId: string;
     requirement: string;
     agentProvider: string;
     agentMode: string;
@@ -213,6 +228,16 @@ export declare class CodeInspectorComponent extends LitElement {
     private buildNodeTreeFromBreadcrumb;
     private getBreadcrumbDisplayParts;
     private scrollActiveBreadcrumbIntoView;
+    private getActiveSelection;
+    private buildSelectionId;
+    private createSelectionFromNodePath;
+    private applySelection;
+    private persistActiveSelectionState;
+    private upsertSelection;
+    private removeSelection;
+    private switchSelection;
+    private isAppendSelectionEvent;
+    private getTargetNodeFromComposedPath;
     private openChat;
     private closeChat;
     getAstroFilePath: (target: HTMLElement) => string;
@@ -231,6 +256,9 @@ export declare class CodeInspectorComponent extends LitElement {
     trackCode: () => void;
     private syncSelectedContextToServer;
     private clearSelectedContextOnServer;
+    private buildSelectedContextPayload;
+    private buildAllSelectedContextPayloads;
+    private buildCompositeContextPrompt;
     private handleModeShortcut;
     showNotification(message: string, type?: 'success' | 'error'): void;
     copyToClipboard(text: string): void;
