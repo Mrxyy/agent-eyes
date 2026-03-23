@@ -1,6 +1,6 @@
 {
   "name": "@agent-eyes/agent-eyes-mcp",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "typings": "./types/index.d.ts",
@@ -54,6 +54,7 @@
     "clear": "rimraf ./dist && rimraf ./types",
     "build": "node ./scripts/build.mjs",
     "pub": "pnpm publish",
-    "pub:beta": "pnpm publish --tag beta"
+    "pub:beta": "pnpm publish --tag beta",
+    "prepack": "pnpm build"
   }
 }
