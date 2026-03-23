@@ -9,7 +9,7 @@
   "license": "MIT",
   "scripts": {
     "clear": "rimraf ./dist && rimraf ./types",
-    "build": "pnpm clear && tsc && vite build",
+    "build": "pnpm clear && tsc && vite build && node ./scripts/copy-core-client-bundles.mjs",
     "pub": "pnpm publish",
     "pub:beta": "pnpm publish --tag beta"
   },

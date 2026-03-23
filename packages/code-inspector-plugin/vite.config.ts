@@ -1,4 +1,10 @@
 import { defineConfig } from 'vite';
+import { builtinModules } from 'module';
+
+const nodeBuiltins = new Set([
+  ...builtinModules,
+  ...builtinModules.map((mod) => `node:${mod}`),
+]);
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -12,17 +18,12 @@ export default defineConfig({
     minify: true,
     emptyOutDir: false,
     rollupOptions: {
-      external: [
-        '@code-inspector/core',
-        '@code-inspector/vite',
-        '@code-inspector/webpack',
-        '@code-inspector/esbuild',
-        '@code-inspector/turbopack',
-        '@code-inspector/mako',
-        'chalk',
-        'path',
-      ],
+      // Bundle workspace packages into a single output as much as possible.
+      // Keep Node.js builtins external for runtime compatibility.
+      external(id) {
+        return nodeBuiltins.has(id);
+      },
     },
-    target: ['node8', 'es2015'],
+    target: ['node18', 'es2020'],
   },
 });

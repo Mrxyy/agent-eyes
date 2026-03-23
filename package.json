@@ -1,6 +1,6 @@
 {
   "name": "@agent-eyes/agent-eyes",
-  "version": "0.0.3",
+  "version": "0.0.8",
   "repository": "git@github.com:zh-lx/code-inspector.git",
   "author": "zh-lx <18366276315@163.com>",
   "license": "MIT",
@@ -44,16 +44,6 @@
     "README.md",
     "README.en.md"
   ],
-  "exports": {
-    ".": {
-      "import": {
-        "default": "./dist/index.mjs"
-      },
-      "require": {
-        "default": "./dist/index.js"
-      }
-    }
-  },
   "main": "dist/index.js",
   "devDependencies": {
     "@vitest/coverage-v8": "2.1.4",
