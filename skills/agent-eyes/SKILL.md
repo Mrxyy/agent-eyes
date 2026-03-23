@@ -14,21 +14,24 @@ description: Verify whether `@agent-eyes/agent-eyes` is installed in the current
 
 ## Apply Order
 1. If `@agent-eyes/agent-eyes` is missing, install it first.
-2. If `AGENTS.md` is missing or lacks the Agent Eyes rule, create or update it.
-3. Before editing code, request `GET /context/selected`.
-4. If the response is `data: null`, stop and ask the user to reselect the target element.
-5. Only after a non-null context is available should the code change proceed.
+2. If installation was performed in this run, help the user finish minimal plugin configuration for their bundler.
+3. If `AGENTS.md` is missing or lacks the Agent Eyes rule, create or update it.
+4. Before editing code, request `GET /context/selected`.
+5. If the response is `data: null`, stop and ask the user to reselect the target element.
+6. Only after a non-null context is available should the code change proceed.
 
 ## Quick Workflow
 1. Check whether `@agent-eyes/agent-eyes` is installed.
 2. If missing, help install and provide minimal setup guidance.
-3. Check whether the project already has `AGENTS.md`.
-4. If missing, create it. If present, append or refine the Agent Eyes workflow rule.
-5. Resolve service base URL.
-6. Request selected-context endpoint before any code change.
-7. If no active selection exists, stop and ask the user to select an element in Agent Eyes.
-8. Validate and normalize response fields.
-9. Build a compact context block for the next agent request.
+3. If installed during this run, actively help configure plugin entry in bundler config files.
+4. Verify config looks effective (plugin imported + plugin applied in config).
+5. Check whether the project already has `AGENTS.md`.
+6. If missing, create it. If present, append or refine the Agent Eyes workflow rule.
+7. Resolve service base URL.
+8. Request selected-context endpoint before any code change.
+9. If no active selection exists, stop and ask the user to select an element in Agent Eyes.
+10. Validate and normalize response fields.
+11. Build a compact context block for the next agent request.
 
 ## Check Plugin Installation
 - Detect package manager from lock files:
@@ -41,8 +44,32 @@ description: Verify whether `@agent-eyes/agent-eyes` is installed in the current
 - `pnpm add -D @agent-eyes/agent-eyes`
 - `yarn add -D @agent-eyes/agent-eyes`
 - `npm i -D @agent-eyes/agent-eyes`
-- After install, provide one minimal config snippet matching the user's bundler (Vite/Webpack/Next.js).
+- When replying to users, provide install commands **on demand**:
+- Default: only show one command that matches detected package manager.
+- If user asks for alternatives, then include `pnpm` / `yarn` / `npm` variants.
+- After install, do not stop at package installation:
+- Identify the active bundler/framework from project files (`vite.config.*`, `webpack.config.*`, `next.config.*`, `nuxt.config.*`, etc.).
+- Help the user update the real config file in-place (or give an exact patch) to include `codeInspectorPlugin(...)`.
+- Include minimal `bundler` + `showSwitch` + `agent.acp.command` fields in example config.
+- Confirm import + plugin registration both exist after edit.
 - If `package.json` cannot be found, ask user to confirm project root before installation.
+
+## Post-Install Configuration Requirement
+- Treat "install plugin" as incomplete until configuration is done.
+- If auto-edit is allowed, modify the detected config file directly and summarize changes.
+- If multiple candidate config files exist, prefer the one used by current scripts in `package.json`.
+- If bundler cannot be inferred, ask one short blocking question and provide 2-3 likely file candidates.
+- After config, instruct user to start/restart dev server and verify Agent Eyes switch appears.
+
+## Bundler Configuration Examples (On Demand)
+- If user asks for "how to configure", provide the example matching their actual bundler/framework.
+- Do not dump all examples by default. Return one best-match snippet first, plus alternatives only when requested.
+- Load examples from [references/bundler-examples.md](references/bundler-examples.md).
+- Prefer reading only the relevant section in that file to keep context small.
+- All snippets should include minimal Agent Eyes config:
+- `bundler`
+- `showSwitch: true`
+- `agent.acp.command`
 
 ## Ensure AGENTS.md Exists
 - Look for `AGENTS.md` in the current project root first.
