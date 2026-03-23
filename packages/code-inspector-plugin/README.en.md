@@ -9,7 +9,7 @@
 
 <hr />
 
-**Language / 语言**: [简体中文](./README.zh-CN.md) | English
+**Language / 语言**: [简体中文](./README.zh.md) | English
 
 ```bash
 npx skills add https://github.com/Mrxyy/agents-eyes
