@@ -15,6 +15,8 @@
 npx skills add https://github.com/Mrxyy/agents-eyes
 ```
 
+然后在你的 Agent 会话中执行 `$agent-eyes`，它会帮助安装所需依赖。
+
 
 ## 为什么需要 Agent Eyes？
 

@@ -15,6 +15,8 @@
 npx skills add https://github.com/Mrxyy/agents-eyes
 ```
 
+Then run `$agent-eyes` in your agent session to help install the required dependencies automatically.
+
 ## Project Links
 
 - **GitHub**: https://github.com/Mrxyy/agents-eyes
