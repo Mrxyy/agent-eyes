@@ -4487,6 +4487,7 @@ export class CodeInspectorComponent extends LitElement {
     .element-info {
       position: absolute;
       pointer-events: none;
+      z-index: 99999999999999999999;
     }
     .element-info.hidden {
       visibility: hidden;

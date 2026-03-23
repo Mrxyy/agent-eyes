@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Eyes"
-  short_description: "Check plugin install, then fetch selected UI context"
-  default_prompt: "Use this skill to verify code-inspector-plugin is installed, help install it when missing, then request the local Agent Eyes context endpoint and normalize the selected-element context for the next agent request."
+  short_description: "Check plugin install; fetch selected UI context only when needed"
+  default_prompt: "Use this skill to verify code-inspector-plugin is installed, help install it when missing, and request local Agent Eyes selected context only for element-anchored or ambiguous UI edits. If /context/selected returns data:null, continue with the default workflow, skip selected-context injection only, and do not block or force element selection."

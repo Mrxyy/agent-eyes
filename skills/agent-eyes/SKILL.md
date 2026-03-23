@@ -1,24 +1,24 @@
 ---
 name: agent-eyes
-description: Verify whether `@agent-eyes/agent-eyes` is installed in the current project, help install it when missing, ensure the project has an `AGENTS.md` rule that requires fetching Agent Eyes selected-code context first, and always fetch the current selected-code context before making code changes. Use when tasks involve page changes, selected elements, DOM path, UI edits, precise code modifications, or when an agent must request selected-element context from the local service before coding.
+description: Verify whether `@agent-eyes/agent-eyes` is installed in the current project, help install it when missing, ensure the project has an `AGENTS.md` rule for context-first edits when needed, and fetch selected-code context only for element-anchored or ambiguous UI changes. Use when tasks involve selected elements, DOM path, or precise UI edits that must be anchored to live selection.
 ---
 
 # Agent Eyes Skill
 
 ## When to Apply
-- Apply this skill before any task that changes UI, styles, layout, text content, component behavior, or page structure.
+- Apply this skill for UI tasks that need element-anchored precision (for example: “this button”, “当前这个区域”, breadcrumb path, DOM path, selected node).
 - Apply this skill when the user refers to “this element”, “当前选中的元素”, “这里”, “这个按钮”, “这个区域”, breadcrumb path, DOM path, or a visual target on the page.
 - Apply this skill when the task requires precise code modification and the target should be anchored to a selected element instead of guessed from text alone.
 - Apply this skill when the project may not yet have `@agent-eyes/agent-eyes` installed or may not yet have an `AGENTS.md` rule enforcing context-first behavior.
-- Do not apply this skill for purely textual tasks that do not depend on a selected UI target, such as general refactors with no page target, package upgrades, or backend-only changes.
+- Do not apply this skill for tasks that can be completed from explicit file paths, code snippets, or clear textual requirements without selected-element context.
 
 ## Apply Order
 1. If `@agent-eyes/agent-eyes` is missing, install it first.
 2. If installation was performed in this run, help the user finish minimal plugin configuration for their bundler.
 3. If `AGENTS.md` is missing or lacks the Agent Eyes rule, create or update it.
-4. Before editing code, request `GET /context/selected`.
-5. If the response is `data: null`, stop and ask the user to reselect the target element.
-6. Only after a non-null context is available should the code change proceed.
+4. If the task is element-anchored/ambiguous, request `GET /context/selected` before editing code.
+5. If the response is `data: null`, the agent MUST continue with the default workflow and skip selected-context injection only.
+6. The agent MUST NOT block execution or require element selection as a prerequisite; it may optionally suggest re-selection only when precision risk is high.
 
 ## Quick Workflow
 1. Check whether `@agent-eyes/agent-eyes` is installed.
@@ -28,8 +28,8 @@ description: Verify whether `@agent-eyes/agent-eyes` is installed in the current
 5. Check whether the project already has `AGENTS.md`.
 6. If missing, create it. If present, append or refine the Agent Eyes workflow rule.
 7. Resolve service base URL.
-8. Request selected-context endpoint before any code change.
-9. If no active selection exists, stop and ask the user to select an element in Agent Eyes.
+8. Request selected-context endpoint only when the target is element-anchored or ambiguous.
+9. If no active selection exists, continue normal code analysis/edit flow and treat context as unavailable.
 10. Validate and normalize response fields.
 11. Build a compact context block for the next agent request.
 
@@ -77,9 +77,9 @@ description: Verify whether `@agent-eyes/agent-eyes` is installed in the current
 - If it exists, preserve user content and append a short Agent Eyes section rather than replacing the whole file.
 - The inserted rule must require:
 - checking `@agent-eyes/agent-eyes` installation
-- fetching `GET /context/selected` before any UI/code modification
-- stopping when the response is `data: null`
-- asking the user to reselect the target element instead of guessing
+- fetching `GET /context/selected` before element-anchored/ambiguous UI modification
+- when `data: null`, continue with default workflow; skip selected-context injection only
+- do not force re-selection; only suggest it when precision risk is high
 
 ## Resolve Base URL
 - Prefer an explicit value from user or environment.
@@ -91,7 +91,7 @@ description: Verify whether `@agent-eyes/agent-eyes` is installed in the current
 - If API requires POST, send an empty JSON body `{}` unless caller specifies filters.
 - Set `Accept: application/json`.
 - Use a short timeout (3-5 seconds) and report endpoint + timeout on failure.
-- Treat `data: null` as "there is no current selection". Do not reuse stale context from earlier requests.
+- Treat `data: null` as "there is no current selection". Do not reuse stale context from earlier requests; continue with default workflow without context injection.
 - For endpoint details and payload schema, read [references/context-api.md](references/context-api.md).
 
 ## Normalize Response
@@ -142,7 +142,7 @@ curl -sS "http://127.0.0.1:5678/context/selected" \
 - attempted URL
 - status code or network error
 - one concrete retry action (check server port, endpoint path, CORS, or auth header)
-- If the endpoint returns `data: null`, ask the user to reselect the element in the visible Agent Eyes panel before continuing.
+- If the endpoint returns `data: null`, do not block the workflow; continue with default workflow and skip selected-context injection.
 - If context is stale, re-request immediately before sending code-modification prompt.
 
 ## Notes

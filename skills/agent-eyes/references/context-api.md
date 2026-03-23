@@ -146,7 +146,7 @@ curl -sS "http://127.0.0.1:5678/context/selected" \
 - object[]: map with `label || name`, then drop falsy values
 5. Truncate `dom.textContent` to 200 chars for prompt safety.
 6. Validate required keys per context item: `filePath`, `line`, `column`, `elementName`, `dom`, `domPath`.
-7. If `data` is `null`, stop and request a fresh selection instead of guessing the target code.
+7. If `data` is `null`, treat selection context as unavailable. The agent MUST continue with the default workflow, skip selected-context injection only, and MUST NOT block on missing selection.
 
 ## Error Mapping
 - 404: endpoint not exposed yet; verify server added `/context/selected`

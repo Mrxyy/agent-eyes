@@ -1,12 +1,14 @@
 # Agent Eyes Workflow
 
-For any task that may modify UI, DOM structure, styles, component behavior, page content, or selected elements:
+For tasks that depend on a selected/visual target (for example “this element”, breadcrumb path, DOM path, or ambiguous UI reference):
 
 1. First verify that `@agent-eyes/agent-eyes` is installed in this project.
-2. Before making any code change, request `GET http://127.0.0.1:5678/context/selected`.
-3. If the response contains `data: null`, do not guess the target code.
-4. Ask the user to open Agent Eyes, select the target element, and keep the selection panel open.
-5. Only after a non-null context is returned may you use that context to locate and modify code precisely.
+2. Before making code change, request `GET http://127.0.0.1:5678/context/selected`.
+3. If the response contains `data: null`, the agent MUST continue with the default workflow.
+4. Skip selected-context injection only, and proceed using explicit files/snippets/requirements available in the request.
+5. The agent MUST NOT require element selection as a prerequisite; it may suggest re-selection (or exact file/line) only when precision is insufficient.
+
+For tasks with explicit targets (exact file path, code snippet, or clear textual requirement), you may proceed without Agent Eyes selection.
 
 Prefer multi-selection fields when available:
 
