@@ -5,7 +5,7 @@ Use this reference when calling the local Agent Eyes service for selected-elemen
 For persistent project behavior, pair this reference with an `AGENTS.md` rule so future agent runs fetch context before editing code.
 
 ## Install Check First
-Before calling this API, ensure `code-inspector-plugin` is installed in the project.
+Before calling this API, ensure `@agent-eyes/agent-eyes` is installed in the project.
 
 Detection order:
 1. Read `package.json` and check `dependencies` + `devDependencies`.
@@ -15,9 +15,9 @@ Detection order:
 - `package-lock.json` -> `npm`
 
 Install command when missing:
-- `pnpm add -D code-inspector-plugin`
-- `yarn add -D code-inspector-plugin`
-- `npm i -D code-inspector-plugin`
+- `pnpm add -D @agent-eyes/agent-eyes`
+- `yarn add -D @agent-eyes/agent-eyes`
+- `npm i -D @agent-eyes/agent-eyes`
 
 ## Endpoint Conventions
 - Preferred endpoint: `GET /context/selected`

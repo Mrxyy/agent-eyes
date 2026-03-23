@@ -5,12 +5,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:5678';
+const AGENT_EYES_PACKAGE_NAME = '@agent-eyes/agent-eyes';
 
 const agentEyesRuleSection = `## Agent Eyes Workflow
 
 For any task that may modify UI, DOM structure, styles, component behavior, page content, or selected elements:
 
-1. First verify that \`code-inspector-plugin\` is installed in this project.
+1. First verify that \`${AGENT_EYES_PACKAGE_NAME}\` is installed in this project.
 2. Before making any code change, request \`GET http://127.0.0.1:5678/context/selected\`.
 3. If the response contains \`data: null\`, do not guess the target code.
 4. Ask the user to open Agent Eyes, select the target element, and keep the selection panel open.
@@ -24,11 +25,11 @@ Prefer multi-selection fields when available:
 
 If only single-selection fields exist, use \`filePath\`, \`line\`, \`column\`, \`elementName\`, \`dom\`, and \`domPath\`.
 
-If \`code-inspector-plugin\` is missing:
+If \`${AGENT_EYES_PACKAGE_NAME}\` is missing:
 
-- \`pnpm add -D code-inspector-plugin\`
-- \`yarn add -D code-inspector-plugin\`
-- \`npm i -D code-inspector-plugin\`
+- \`pnpm add -D ${AGENT_EYES_PACKAGE_NAME}\`
+- \`yarn add -D ${AGENT_EYES_PACKAGE_NAME}\`
+- \`npm i -D ${AGENT_EYES_PACKAGE_NAME}\`
 
 Then add the minimal bundler configuration required by the current project before continuing.
 `;
@@ -58,7 +59,7 @@ function readProjectPackageMeta(rootDir: string) {
     return {
       packageJsonPath,
       packageExists: true,
-      pluginInstalled: !!deps['code-inspector-plugin'],
+      pluginInstalled: !!deps[AGENT_EYES_PACKAGE_NAME],
     };
   } catch {
     return {
@@ -223,10 +224,10 @@ export function createAgentEyesMcpServer() {
         const packageManager = detectPackageManager(rootDir);
         const installCommand =
           packageManager === 'pnpm'
-            ? 'pnpm add -D code-inspector-plugin'
+            ? `pnpm add -D ${AGENT_EYES_PACKAGE_NAME}`
             : packageManager === 'yarn'
-            ? 'yarn add -D code-inspector-plugin'
-            : 'npm i -D code-inspector-plugin';
+            ? `yarn add -D ${AGENT_EYES_PACKAGE_NAME}`
+            : `npm i -D ${AGENT_EYES_PACKAGE_NAME}`;
         const agentsResult = ensureAgentsRule(rootDir);
         const result = {
           rootDir,

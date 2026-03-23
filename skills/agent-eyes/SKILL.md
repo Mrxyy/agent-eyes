@@ -1,6 +1,6 @@
 ---
 name: agent-eyes
-description: Verify whether `code-inspector-plugin` is installed in the current project, help install it when missing, ensure the project has an `AGENTS.md` rule that requires fetching Agent Eyes selected-code context first, and always fetch the current selected-code context before making code changes. Use when tasks involve page changes, selected elements, DOM path, UI edits, precise code modifications, or when an agent must request selected-element context from the local service before coding.
+description: Verify whether `@agent-eyes/agent-eyes` is installed in the current project, help install it when missing, ensure the project has an `AGENTS.md` rule that requires fetching Agent Eyes selected-code context first, and always fetch the current selected-code context before making code changes. Use when tasks involve page changes, selected elements, DOM path, UI edits, precise code modifications, or when an agent must request selected-element context from the local service before coding.
 ---
 
 # Agent Eyes Skill
@@ -9,18 +9,18 @@ description: Verify whether `code-inspector-plugin` is installed in the current 
 - Apply this skill before any task that changes UI, styles, layout, text content, component behavior, or page structure.
 - Apply this skill when the user refers to “this element”, “当前选中的元素”, “这里”, “这个按钮”, “这个区域”, breadcrumb path, DOM path, or a visual target on the page.
 - Apply this skill when the task requires precise code modification and the target should be anchored to a selected element instead of guessed from text alone.
-- Apply this skill when the project may not yet have `code-inspector-plugin` installed or may not yet have an `AGENTS.md` rule enforcing context-first behavior.
+- Apply this skill when the project may not yet have `@agent-eyes/agent-eyes` installed or may not yet have an `AGENTS.md` rule enforcing context-first behavior.
 - Do not apply this skill for purely textual tasks that do not depend on a selected UI target, such as general refactors with no page target, package upgrades, or backend-only changes.
 
 ## Apply Order
-1. If `code-inspector-plugin` is missing, install it first.
+1. If `@agent-eyes/agent-eyes` is missing, install it first.
 2. If `AGENTS.md` is missing or lacks the Agent Eyes rule, create or update it.
 3. Before editing code, request `GET /context/selected`.
 4. If the response is `data: null`, stop and ask the user to reselect the target element.
 5. Only after a non-null context is available should the code change proceed.
 
 ## Quick Workflow
-1. Check whether `code-inspector-plugin` is installed.
+1. Check whether `@agent-eyes/agent-eyes` is installed.
 2. If missing, help install and provide minimal setup guidance.
 3. Check whether the project already has `AGENTS.md`.
 4. If missing, create it. If present, append or refine the Agent Eyes workflow rule.
@@ -35,12 +35,12 @@ description: Verify whether `code-inspector-plugin` is installed in the current 
 - `pnpm-lock.yaml` -> use `pnpm`
 - `yarn.lock` -> use `yarn`
 - `package-lock.json` -> use `npm`
-- Check if `code-inspector-plugin` exists in dependencies:
+- Check if `@agent-eyes/agent-eyes` exists in dependencies:
 - Inspect root `package.json` (`dependencies` and `devDependencies`).
 - If not found, install with the detected package manager:
-- `pnpm add -D code-inspector-plugin`
-- `yarn add -D code-inspector-plugin`
-- `npm i -D code-inspector-plugin`
+- `pnpm add -D @agent-eyes/agent-eyes`
+- `yarn add -D @agent-eyes/agent-eyes`
+- `npm i -D @agent-eyes/agent-eyes`
 - After install, provide one minimal config snippet matching the user's bundler (Vite/Webpack/Next.js).
 - If `package.json` cannot be found, ask user to confirm project root before installation.
 
@@ -49,7 +49,7 @@ description: Verify whether `code-inspector-plugin` is installed in the current 
 - If it does not exist, create `AGENTS.md` with the Agent Eyes workflow template from [references/agents-template.md](references/agents-template.md).
 - If it exists, preserve user content and append a short Agent Eyes section rather than replacing the whole file.
 - The inserted rule must require:
-- checking `code-inspector-plugin` installation
+- checking `@agent-eyes/agent-eyes` installation
 - fetching `GET /context/selected` before any UI/code modification
 - stopping when the response is `data: null`
 - asking the user to reselect the target element instead of guessing
