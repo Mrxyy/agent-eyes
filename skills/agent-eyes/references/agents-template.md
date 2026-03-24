@@ -3,7 +3,7 @@
 For tasks that depend on a selected/visual target (for example “this element”, breadcrumb path, DOM path, or ambiguous UI reference):
 
 1. First verify that `@agent-eyes/agent-eyes` is installed in this project.
-2. Before making code change, request `GET http://127.0.0.1:5678/context/selected`.
+2. Resolve base URL from current project `.code-inspector/record.json` first (fallback `http://127.0.0.1:5678`), then request `GET {baseUrl}/context/selected`.
 3. If the response contains `data: null`, the agent MUST continue with the default workflow.
 4. Skip selected-context injection only, and proceed using explicit files/snippets/requirements available in the request.
 5. The agent MUST NOT require element selection as a prerequisite; it may suggest re-selection (or exact file/line) only when precision is insufficient.

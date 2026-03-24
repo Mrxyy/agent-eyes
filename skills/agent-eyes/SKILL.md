@@ -82,8 +82,10 @@ description: Verify whether `@agent-eyes/agent-eyes` is installed in the current
 - do not force re-selection; only suggest it when precision risk is high
 
 ## Resolve Base URL
-- Prefer an explicit value from user or environment.
-- If not provided, use `http://127.0.0.1:5678`.
+- Prefer an explicit value from user/tool input.
+- If not provided, prefer environment (`AGENT_EYES_BASE_URL` / `CODE_INSPECTOR_BASE_URL`).
+- If still missing, read current project `.code-inspector/record.json` and use its `port`.
+- Fallback to `http://127.0.0.1:5678`.
 - Keep path configurable; do not hardcode if caller provides a different endpoint.
 
 ## Request Context Endpoint
@@ -133,7 +135,7 @@ Path: {domPathJoined}
 
 ## Request Example
 ```bash
-curl -sS "http://127.0.0.1:5678/context/selected" \
+curl -sS "${BASE_URL}/context/selected" \
   -H "Accept: application/json"
 ```
 

@@ -21,14 +21,18 @@ Install command when missing:
 
 ## Endpoint Conventions
 - Preferred endpoint: `GET /context/selected`
-- Base URL: `http://127.0.0.1:5678` unless caller provides another host/port
+- Base URL resolution order:
+1. explicit tool/input `baseUrl`
+2. `AGENT_EYES_BASE_URL` / `CODE_INSPECTOR_BASE_URL`
+3. current project `.code-inspector/record.json` port
+4. fallback `http://127.0.0.1:5678`
 - Content type: `application/json`
 - This endpoint should only return context while the Agent Eyes selection panel is actively open.
 - When selection is canceled or the panel is closed, the endpoint should return `data: null`.
 
 ## Example Request
 ```bash
-curl -sS "http://127.0.0.1:5678/context/selected" \
+curl -sS "${BASE_URL}/context/selected" \
   -H "Accept: application/json"
 ```
 

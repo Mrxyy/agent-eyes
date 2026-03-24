@@ -30,6 +30,11 @@ Example stdio config:
 
 ## Tool notes
 
-`get_selected_context` expects the local Agent Eyes service to be running, usually at `http://127.0.0.1:5678`.
+`get_selected_context` auto-resolves base URL in this order:
+
+1. `baseUrl` tool argument
+2. `AGENT_EYES_BASE_URL` / `CODE_INSPECTOR_BASE_URL`
+3. current project `.code-inspector/record.json` port
+4. fallback `http://127.0.0.1:5678`
 
 `ensure_agents_rule` writes `AGENTS.md` in the provided `projectRoot`, or in the current working directory when omitted.

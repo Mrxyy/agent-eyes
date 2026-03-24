@@ -6,16 +6,17 @@ import { z } from 'zod';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:5678';
 const AGENT_EYES_PACKAGE_NAME = '@agent-eyes/agent-eyes';
+const RECORD_FILE_RELATIVE_PATH = '.code-inspector/record.json';
 
 const agentEyesRuleSection = `## Agent Eyes Workflow
 
-For any task that may modify UI, DOM structure, styles, component behavior, page content, or selected elements:
+For tasks that depend on selected/visual targets (for example: "this element", DOM path, breadcrumb, or ambiguous UI references):
 
 1. First verify that \`${AGENT_EYES_PACKAGE_NAME}\` is installed in this project.
-2. Before making any code change, request \`GET http://127.0.0.1:5678/context/selected\`.
-3. If the response contains \`data: null\`, do not guess the target code.
-4. Ask the user to open Agent Eyes, select the target element, and keep the selection panel open.
-5. Only after a non-null context is returned may you use that context to locate and modify code precisely.
+2. Resolve Agent Eyes base URL from \`${RECORD_FILE_RELATIVE_PATH}\` for current project first; fallback to \`${DEFAULT_BASE_URL}\`.
+3. Before precise UI edits, request \`GET {baseUrl}/context/selected\`.
+4. If the response contains \`data: null\`, continue with default workflow and skip selected-context injection only.
+5. Do not block or force selection as a prerequisite.
 
 Prefer multi-selection fields when available:
 
@@ -81,6 +82,55 @@ function getAgentsFileStatus(rootDir: string) {
     hasRule,
     content,
   };
+}
+
+function readProjectPortFromRecord(rootDir: string): number | undefined {
+  const recordFilePath = path.join(rootDir, RECORD_FILE_RELATIVE_PATH);
+  if (!fs.existsSync(recordFilePath)) {
+    return undefined;
+  }
+  try {
+    const content = JSON.parse(fs.readFileSync(recordFilePath, 'utf-8'));
+    const record = content?.[rootDir];
+    const port = Number(record?.port);
+    if (Number.isFinite(port) && port > 0) {
+      return port;
+    }
+  } catch {
+    // ignore parse errors and fallback to env/default
+  }
+  return undefined;
+}
+
+function resolveAgentEyesBaseUrl({
+  baseUrl,
+  projectRoot,
+}: {
+  baseUrl?: string;
+  projectRoot?: string;
+}) {
+  const rootDir = path.resolve(projectRoot || process.cwd());
+  if (baseUrl) {
+    return { baseUrl, rootDir, source: 'input' as const };
+  }
+
+  const envBaseUrl =
+    process.env.AGENT_EYES_BASE_URL || process.env.CODE_INSPECTOR_BASE_URL;
+  if (envBaseUrl) {
+    return { baseUrl: envBaseUrl, rootDir, source: 'env' as const };
+  }
+
+  const port = readProjectPortFromRecord(rootDir);
+  if (port) {
+    return {
+      baseUrl: `http://127.0.0.1:${port}`,
+      rootDir,
+      source: 'record' as const,
+      port,
+    };
+  }
+
+  return { baseUrl: DEFAULT_BASE_URL, rootDir, source: 'default' as const };
 }
 
 async function getSelectedContext(baseUrl: string) {
@@ -175,21 +225,38 @@ export function createAgentEyesMcpServer() {
         baseUrl: z
           .string()
           .optional()
-          .describe('Agent Eyes local service base URL, default http://127.0.0.1:5678'),
+          .describe(
+            'Agent Eyes local service base URL. When omitted, auto-resolve from project record/env/default.'
+          ),
+        projectRoot: z
+          .string()
+          .optional()
+          .describe(
+            'Project root used to resolve .code-inspector/record.json. Defaults to current working directory.'
+          ),
       },
     },
-    async ({ baseUrl }) => {
+    async ({ baseUrl, projectRoot }) => {
       try {
-        const payload = await getSelectedContext(baseUrl || DEFAULT_BASE_URL);
+        const resolved = resolveAgentEyesBaseUrl({ baseUrl, projectRoot });
+        const payload = await getSelectedContext(resolved.baseUrl);
         const normalized = normalizeSelectedContextPayload(payload);
+        const result = {
+          ...normalized,
+          _meta: {
+            resolvedBaseUrl: resolved.baseUrl,
+            resolveSource: resolved.source,
+            projectRoot: resolved.rootDir,
+          },
+        };
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(normalized, null, 2),
+              text: JSON.stringify(result, null, 2),
             },
           ],
-          structuredContent: normalized,
+          structuredContent: result,
         };
       } catch (error) {
         return {

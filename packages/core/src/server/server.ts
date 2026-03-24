@@ -34,13 +34,13 @@ export function getRelativeOrAbsolutePath(
 
 const agentEyesRuleSection = `## Agent Eyes Workflow
 
-For any task that may modify UI, DOM structure, styles, component behavior, page content, or selected elements:
+For tasks that depend on selected/visual targets (for example: "this element", DOM path, breadcrumb, or ambiguous UI references):
 
 1. First verify that \`@agent-eyes/agent-eyes\` is installed in this project.
-2. Before making any code change, request \`GET http://127.0.0.1:5678/context/selected\`.
-3. If the response contains \`data: null\`, do not guess the target code.
-4. Ask the user to open Agent Eyes, select the target element, and keep the selection panel open.
-5. Only after a non-null context is returned may you use that context to locate and modify code precisely.
+2. Resolve Agent Eyes base URL from \`.code-inspector/record.json\` for current project first; fallback to \`http://127.0.0.1:5678\`.
+3. Before precise UI edits, request \`GET {baseUrl}/context/selected\`.
+4. If the response contains \`data: null\`, continue with default workflow and skip selected-context injection only.
+5. Do not block or force selection as a prerequisite.
 
 Prefer multi-selection fields when available:
 
@@ -1134,9 +1134,7 @@ export async function startServer(options: CodeOptions, record: RecordInfo) {
               chalk.blue('[code-inspector-plugin]'),
               'Server is running on:',
               chalk.green(
-                `http://${getIP(options.ip || 'localhost')}:${
-                  options.port ?? DefaultPort
-                }`
+                `http://${getIP(options.ip || 'localhost')}:${port}`
               ),
             ];
             console.log(info.join(' '));
