@@ -13,6 +13,22 @@ export default defineConfig({
     emptyOutDir: false,
     rollupOptions: {
       external: ['@code-inspector/core', 'path', 'fs'],
+      output: [
+        {
+          format: 'cjs',
+          entryFileNames: 'index.js',
+          paths: {
+            '@code-inspector/core': '../../core/dist/index.js',
+          },
+        },
+        {
+          format: 'es',
+          entryFileNames: 'index.mjs',
+          paths: {
+            '@code-inspector/core': '../../core/dist/index.mjs',
+          },
+        },
+      ],
     },
     target: ['node8', 'es2015'],
   },

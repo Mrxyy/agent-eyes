@@ -14,6 +14,9 @@ export default defineConfig({
       external: ['@code-inspector/core', '@vue/compiler-sfc', 'path'],
       output: {
         exports: 'default', // 设置默认导出
+        paths: {
+          '@code-inspector/core': '../../core/dist/index.js',
+        },
       },
     },
     target: ['node8', 'es2015'],

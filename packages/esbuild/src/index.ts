@@ -51,9 +51,10 @@ export function EsbuildCodeInspectorPlugin(options: Options) {
           // 文件首次编译或者发生修改
           if (!result || result.originCode !== originCode) {
             let code = originCode;
+            const ext = path.extname(filePath).replace('.', '');
 
             if (isExcludedFile(filePath, options)) {
-              return code;
+              return { contents: code, loader: ext };
             }
 
             code = await getCodeWithWebComponent({
@@ -94,7 +95,6 @@ export function EsbuildCodeInspectorPlugin(options: Options) {
               code = code.replace(descriptor.template.content, templateContent);
             }
 
-            const ext = path.extname(filePath).replace('.', '');
             result = { originCode, output: { contents: code, loader: ext } };
             cache.set(filePath, result);
           }

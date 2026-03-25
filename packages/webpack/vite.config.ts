@@ -13,9 +13,25 @@ export default defineConfig({
     emptyOutDir: false,
     rollupOptions: {
       external: ['@code-inspector/core', '@vue/compiler-sfc', 'path'],
-      output: {
-        exports: 'default', // 设置默认导出
-      },
+      output: [
+        {
+          format: 'umd',
+          name: 'WebpackCodeInspectorPlugin',
+          entryFileNames: 'index.umd.js',
+          exports: 'default', // 设置默认导出
+          paths: {
+            '@code-inspector/core': '../../core/dist/index.js',
+          },
+        },
+        {
+          format: 'es',
+          entryFileNames: 'index.mjs',
+          exports: 'default', // 设置默认导出
+          paths: {
+            '@code-inspector/core': '../../core/dist/index.mjs',
+          },
+        },
+      ],
     },
     target: ['node8', 'es2015'],
   },
