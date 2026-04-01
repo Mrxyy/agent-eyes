@@ -1077,7 +1077,8 @@ export class CodeInspectorComponent extends LitElement {
     if (force !== true && (this.nodeTree || this.chatOpen)) {
       return;
     }
-    this.clearSelectedContextOnServer();
+    // Selected context is synced only for Agent/ACP workflows (when chat is open).
+    // Avoid clearing it on every hover/mousemove-driven cover hide.
     this.targetNode = null;
     this.anchorNode = null;
     this.show = false;
