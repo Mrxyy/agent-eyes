@@ -23,9 +23,11 @@ Install command when missing:
 - Preferred endpoint: `GET /context/selected`
 - Base URL resolution order:
 1. explicit tool/input `baseUrl`
-2. `AGENT_EYES_BASE_URL` / `CODE_INSPECTOR_BASE_URL`
-3. current project `.code-inspector/record.json` port
+2. explicit project path matched against entries in the git root `.code-inspector/record.json`, then probe candidate ports with `GET /context/selected`
+3. current workspace path matched against entries in the git root `.code-inspector/record.json`, then probe candidate ports with `GET /context/selected`
 4. fallback `http://127.0.0.1:5678`
+- Do not discover `.code-inspector/record.json` by generic hidden-file search when the git root is known.
+- Do not probe arbitrary common ports; only probe ports listed in the matched `record.json`, plus the single fallback `5678`.
 - Content type: `application/json`
 - This endpoint should only return context while the Agent Eyes selection panel is actively open.
 - When selection is canceled or the panel is closed, the endpoint should return `data: null`.

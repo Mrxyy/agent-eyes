@@ -5,6 +5,21 @@ import { hasWritePermission } from './utils';
 
 const RecordCache: { [key: string]: Partial<RecordInfo> } = {};
 
+function getRecordProjectDir() {
+  try {
+    // Avoid static server-only imports because this module is also bundled for browser use.
+    const runtimeRequire = new Function('return require')();
+    const { execSync } = runtimeRequire('child_process') as typeof import('child_process');
+    const gitRoot = execSync('git rev-parse --show-toplevel', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return gitRoot || process.cwd();
+  } catch {
+    return process.cwd();
+  }
+}
+
 function getRecordFileContent(recordFilePath: string): {
   [key: string]: Partial<RecordInfo>;
 } {
@@ -21,9 +36,19 @@ function getRecordFileContent(recordFilePath: string): {
   return {};
 }
 
+function ensureRecordOutputDir(output: string) {
+  try {
+    fs.mkdirSync(output, { recursive: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const resetFileRecord = (output: string) => {
   const recordFilePath = path.resolve(output, './record.json');
-  const projectDir = process.cwd();
+  const projectDir = getRecordProjectDir();
+  ensureRecordOutputDir(output);
   const content = getRecordFileContent(recordFilePath);
   const EmptyRecord: Partial<RecordInfo> = {
     previousPort: content[projectDir]?.port,
@@ -41,7 +66,7 @@ export const resetFileRecord = (output: string) => {
 export const getProjectRecord = (record: RecordInfo) => {
   const recordFilePath = path.resolve(record.output, './record.json');
   const content = getRecordFileContent(recordFilePath);
-  const projectDir = process.cwd();
+  const projectDir = getRecordProjectDir();
   if (hasWritePermission(recordFilePath)) {
     return content[projectDir];
   } else {
@@ -55,8 +80,9 @@ export const setProjectRecord = (
   value: RecordInfo[keyof RecordInfo]
 ) => {
   const recordFilePath = path.resolve(record.output, './record.json');
+  ensureRecordOutputDir(record.output);
   const content = getRecordFileContent(recordFilePath);
-  const projectDir = process.cwd();
+  const projectDir = getRecordProjectDir();
   if (!content[projectDir]) {
     content[projectDir] = {};
   }
@@ -72,7 +98,7 @@ export const setProjectRecord = (
 export const findPort = async (record: RecordInfo): Promise<number> => {
   const recordFilePath = path.resolve(record.output, './record.json');
   const content = getRecordFileContent(recordFilePath);
-  const projectDir = process.cwd();
+  const projectDir = getRecordProjectDir();
   if (content[projectDir]?.port) {
     return content[projectDir].port as number;
   } else if (RecordCache[projectDir]?.port) {

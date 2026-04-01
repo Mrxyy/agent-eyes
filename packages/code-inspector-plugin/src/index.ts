@@ -6,6 +6,7 @@ import { MakoCodeInspectorPlugin } from '@code-inspector/mako';
 import {
   CodeOptions,
   getEnvVariable,
+  ProjectRootPath,
   resetFileRecord,
 } from '@code-inspector/core';
 import chalk from 'chalk';
@@ -20,6 +21,7 @@ export interface CodeInspectorPluginOptions extends CodeOptions {
 }
 
 export function CodeInspectorPlugin(options: CodeInspectorPluginOptions): any {
+  const projectRoot = ProjectRootPath || process.cwd();
   // 没有 bundler 参数，报错
   if (!options?.bundler) {
     console.log(
@@ -33,7 +35,7 @@ export function CodeInspectorPlugin(options: CodeInspectorPluginOptions): any {
   let close = false;
   if (options.needEnvInspector) {
     close = true;
-    if (getEnvVariable('CODE_INSPECTOR', process.cwd()) === 'true') {
+    if (getEnvVariable('CODE_INSPECTOR', projectRoot) === 'true') {
       close = false;
     }
   }
@@ -41,7 +43,7 @@ export function CodeInspectorPlugin(options: CodeInspectorPluginOptions): any {
   const params = {
     ...options,
     close,
-    output: path.resolve(process.cwd(), '.code-inspector'),
+    output: path.resolve(projectRoot, '.code-inspector'),
   };
   resetFileRecord(params.output);
   if (options.bundler === 'webpack' || options.bundler === 'rspack') {

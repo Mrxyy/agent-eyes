@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -7,16 +8,29 @@ import { z } from 'zod';
 const DEFAULT_BASE_URL = 'http://127.0.0.1:5678';
 const AGENT_EYES_PACKAGE_NAME = '@agent-eyes/agent-eyes';
 const RECORD_FILE_RELATIVE_PATH = '.code-inspector/record.json';
+const PROBE_TIMEOUT_MS = 1500;
 
 const agentEyesRuleSection = `## Agent Eyes Workflow
 
 For tasks that depend on selected/visual targets (for example: "this element", DOM path, breadcrumb, or ambiguous UI references):
 
 1. First verify that \`${AGENT_EYES_PACKAGE_NAME}\` is installed in this project.
-2. Resolve Agent Eyes base URL from \`${RECORD_FILE_RELATIVE_PATH}\` for current project first; fallback to \`${DEFAULT_BASE_URL}\`.
+2. Resolve Agent Eyes base URL with this exact order:
+   a. If the tool call explicitly provides \`baseUrl\`, use it directly.
+   b. Otherwise resolve git root from the explicit project path, or from the current workspace path when no project path was provided.
+   c. Read only \`<gitRoot>/${RECORD_FILE_RELATIVE_PATH}\`. Do not search other hidden files or other record locations.
+   d. Match the current project directory against record keys with longest-prefix project matching, using the same project-directory semantics as \`data-insp-path\`.
+   e. Probe the matched project port first with \`GET {baseUrl}/context/selected\`, then probe other ports from the same record file.
+   f. If every record port fails, fallback to \`${DEFAULT_BASE_URL}\`.
 3. Before precise UI edits, request \`GET {baseUrl}/context/selected\`.
 4. If the response contains \`data: null\`, continue with default workflow and skip selected-context injection only.
 5. Do not block or force selection as a prerequisite.
+
+Strict rules:
+
+- Do not search for \`.code-inspector/record.json\` with \`find\`, \`rg\`, or other filesystem heuristics.
+- Do not scan arbitrary common ports such as \`3000\`, \`5173\`, or \`8080\`.
+- Do not infer the project from whichever port responds first. Project matching must happen from the record file entry keys first.
 
 Prefer multi-selection fields when available:
 
@@ -40,6 +54,20 @@ function detectPackageManager(rootDir: string) {
   if (fs.existsSync(path.join(rootDir, 'yarn.lock'))) return 'yarn';
   if (fs.existsSync(path.join(rootDir, 'package-lock.json'))) return 'npm';
   return 'npm';
+}
+
+function getProjectRoot(fromDir?: string): string {
+  try {
+    const command = fromDir
+      ? `git -C ${JSON.stringify(path.resolve(fromDir))} rev-parse --show-toplevel`
+      : 'git rev-parse --show-toplevel';
+    return execSync(command, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch {
+    return '';
+  }
 }
 
 function readProjectPackageMeta(rootDir: string) {
@@ -84,53 +112,162 @@ function getAgentsFileStatus(rootDir: string) {
   };
 }
 
-function readProjectPortFromRecord(rootDir: string): number | undefined {
-  const recordFilePath = path.join(rootDir, RECORD_FILE_RELATIVE_PATH);
-  if (!fs.existsSync(recordFilePath)) {
-    return undefined;
-  }
-  try {
-    const content = JSON.parse(fs.readFileSync(recordFilePath, 'utf-8'));
-    const record = content?.[rootDir];
-    const port = Number(record?.port);
-    if (Number.isFinite(port) && port > 0) {
-      return port;
-    }
-  } catch {
-    // ignore parse errors and fallback to env/default
-  }
-  return undefined;
+function getProjectRecordFilePath(rootDir: string) {
+  return path.join(rootDir, RECORD_FILE_RELATIVE_PATH);
 }
 
-function resolveAgentEyesBaseUrl({
+function isPathInside(targetPath: string, candidateRoot: string) {
+  const normalizedTarget = path.resolve(targetPath);
+  const normalizedRoot = path.resolve(candidateRoot);
+  return (
+    normalizedTarget === normalizedRoot ||
+    normalizedTarget.startsWith(normalizedRoot + path.sep)
+  );
+}
+
+function resolvePreferredProjectEntry(
+  entries: string[],
+  projectPath?: string
+) {
+  if (!projectPath) return '';
+  const normalizedProjectPath = path.resolve(projectPath);
+  const matches = entries
+    .filter((entryRoot) => isPathInside(normalizedProjectPath, entryRoot))
+    .sort((a, b) => b.length - a.length);
+  return matches[0] || '';
+}
+
+function resolveCodeInspectorRoot(projectRoot?: string) {
+  const requestedProjectRoot = projectRoot
+    ? path.resolve(projectRoot)
+    : path.resolve(process.cwd());
+  if (projectRoot) {
+    const rootDir = getProjectRoot(projectRoot) || requestedProjectRoot;
+    return {
+      rootDir,
+      requestedProjectRoot,
+      source: 'project-root' as const,
+    };
+  }
+
+  const rootDir = getProjectRoot(process.cwd()) || requestedProjectRoot;
+  return {
+    rootDir,
+    requestedProjectRoot,
+    source: 'cwd' as const,
+  };
+}
+
+function readCandidatePorts(rootDir: string, projectRoot?: string) {
+  const recordFilePath = getProjectRecordFilePath(rootDir);
+  if (!fs.existsSync(recordFilePath)) {
+    return {
+      recordFilePath,
+      preferredProjectRoot: '',
+      candidatePorts: [] as number[],
+    };
+  }
+
+  try {
+    const content = JSON.parse(fs.readFileSync(recordFilePath, 'utf-8')) || {};
+    const preferredProjectRoot = resolvePreferredProjectEntry(
+      Object.keys(content),
+      projectRoot
+    );
+    const ports = Object.entries(content)
+      .map(([entryRoot, entry]: [string, any]) => ({
+        entryRoot,
+        port: Number(entry?.port),
+      }))
+      .filter((item) => Number.isFinite(item.port) && item.port > 0)
+      .sort((a, b) => {
+        if (a.entryRoot === preferredProjectRoot) return -1;
+        if (b.entryRoot === preferredProjectRoot) return 1;
+        return a.port - b.port;
+      })
+      .map((item) => item.port);
+
+    return {
+      recordFilePath,
+      preferredProjectRoot,
+      candidatePorts: Array.from(new Set(ports)),
+    };
+  } catch {
+    return {
+      recordFilePath,
+      preferredProjectRoot: '',
+      candidatePorts: [] as number[],
+    };
+  }
+}
+
+async function probeBaseUrl(baseUrl: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/context/selected`, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function resolveAgentEyesBaseUrl({
   baseUrl,
   projectRoot,
 }: {
   baseUrl?: string;
   projectRoot?: string;
 }) {
-  const rootDir = path.resolve(projectRoot || process.cwd());
+  const {
+    rootDir,
+    requestedProjectRoot,
+    source: rootSource,
+  } = resolveCodeInspectorRoot(projectRoot);
   if (baseUrl) {
-    return { baseUrl, rootDir, source: 'input' as const };
-  }
-
-  const envBaseUrl =
-    process.env.AGENT_EYES_BASE_URL || process.env.CODE_INSPECTOR_BASE_URL;
-  if (envBaseUrl) {
-    return { baseUrl: envBaseUrl, rootDir, source: 'env' as const };
-  }
-
-  const port = readProjectPortFromRecord(rootDir);
-  if (port) {
     return {
-      baseUrl: `http://127.0.0.1:${port}`,
+      baseUrl,
       rootDir,
-      source: 'record' as const,
-      port,
+      requestedProjectRoot,
+      source: 'input' as const,
+      recordFilePath: getProjectRecordFilePath(rootDir),
+      preferredProjectRoot: '',
+      candidatePorts: [] as number[],
     };
   }
 
-  return { baseUrl: DEFAULT_BASE_URL, rootDir, source: 'default' as const };
+  const { recordFilePath, preferredProjectRoot, candidatePorts } =
+    readCandidatePorts(rootDir, projectRoot);
+  for (const port of candidatePorts) {
+    const candidateBaseUrl = `http://127.0.0.1:${port}`;
+    if (await probeBaseUrl(candidateBaseUrl)) {
+      return {
+        baseUrl: candidateBaseUrl,
+        rootDir,
+        requestedProjectRoot,
+        source: 'record-probe' as const,
+        recordFilePath,
+        preferredProjectRoot,
+        candidatePorts,
+        port,
+      };
+    }
+  }
+
+  return {
+    baseUrl: DEFAULT_BASE_URL,
+    rootDir,
+    requestedProjectRoot,
+    recordFilePath,
+    preferredProjectRoot,
+    candidatePorts,
+    source: rootSource === 'project-root' ? ('default-project-root' as const) : ('default' as const),
+  };
 }
 
 async function getSelectedContext(baseUrl: string) {
@@ -226,19 +363,19 @@ export function createAgentEyesMcpServer() {
           .string()
           .optional()
           .describe(
-            'Agent Eyes local service base URL. When omitted, auto-resolve from project record/env/default.'
+            'Agent Eyes local service base URL. When omitted, resolve from the matched project entry inside <gitRoot>/.code-inspector/record.json, then fallback to http://127.0.0.1:5678.'
           ),
         projectRoot: z
           .string()
           .optional()
           .describe(
-            'Project root used to resolve .code-inspector/record.json. Defaults to current working directory.'
+            'Project directory used for longest-prefix matching against keys in <gitRoot>/.code-inspector/record.json. When omitted, uses the current workspace path to resolve the git root and match the project entry.'
           ),
       },
     },
     async ({ baseUrl, projectRoot }) => {
       try {
-        const resolved = resolveAgentEyesBaseUrl({ baseUrl, projectRoot });
+        const resolved = await resolveAgentEyesBaseUrl({ baseUrl, projectRoot });
         const payload = await getSelectedContext(resolved.baseUrl);
         const normalized = normalizeSelectedContextPayload(payload);
         const result = {
@@ -246,7 +383,11 @@ export function createAgentEyesMcpServer() {
           _meta: {
             resolvedBaseUrl: resolved.baseUrl,
             resolveSource: resolved.source,
-            projectRoot: resolved.rootDir,
+            gitRoot: resolved.rootDir,
+            requestedProjectRoot: resolved.requestedProjectRoot,
+            recordFilePath: resolved.recordFilePath,
+            matchedProjectRoot: resolved.preferredProjectRoot,
+            candidatePorts: resolved.candidatePorts,
           },
         };
         return {
@@ -281,11 +422,11 @@ export function createAgentEyesMcpServer() {
         projectRoot: z
           .string()
           .optional()
-          .describe('Project root directory. Defaults to current working directory.'),
+          .describe('Project root directory. Defaults to the current workspace git root.'),
       },
     },
     async ({ projectRoot }) => {
-      const rootDir = path.resolve(projectRoot || process.cwd());
+      const rootDir = path.resolve(projectRoot || getProjectRoot() || process.cwd());
       try {
         const packageMeta = readProjectPackageMeta(rootDir);
         const packageManager = detectPackageManager(rootDir);

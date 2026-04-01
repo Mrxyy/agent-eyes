@@ -83,10 +83,50 @@ description: Verify whether `@agent-eyes/agent-eyes` is installed in the current
 
 ## Resolve Base URL
 - Prefer an explicit value from user/tool input.
-- If not provided, prefer environment (`AGENT_EYES_BASE_URL` / `CODE_INSPECTOR_BASE_URL`).
-- If still missing, read current project `.code-inspector/record.json` and use its `port`.
+- If an explicit project path is provided, resolve its git root first, then read that git root `.code-inspector/record.json`.
+- If no explicit project path is provided, resolve the current workspace git root, then read that git root `.code-inspector/record.json`.
+- Match the project path against entries in `record.json` using longest-prefix project-directory matching.
+- Probe candidate ports with `GET /context/selected` and use the first reachable base URL.
 - Fallback to `http://127.0.0.1:5678`.
 - Keep path configurable; do not hardcode if caller provides a different endpoint.
+- The agent MUST NOT search the filesystem for `.code-inspector/record.json` using ad-hoc globbing such as `rg --files`, `find`, or similar discovery when the git-root path is already known.
+- The agent MUST NOT guess ports by scanning common ports like `5678 3000 5173 8080`.
+- The agent MUST only probe ports that come from the matched `.code-inspector/record.json`, plus the single fallback `5678`.
+- If using MCP is available, prefer MCP resolution over reimplementing the lookup manually in the agent response flow.
+
+Use this exact project-directory matching logic:
+
+```ts
+import path from 'path';
+
+function isPathInside(targetPath: string, candidateRoot: string) {
+  const normalizedTarget = path.resolve(targetPath);
+  const normalizedRoot = path.resolve(candidateRoot);
+  return (
+    normalizedTarget === normalizedRoot ||
+    normalizedTarget.startsWith(normalizedRoot + path.sep)
+  );
+}
+
+function resolvePreferredProjectEntry(
+  recordEntries: string[],
+  projectPath: string
+) {
+  const normalizedProjectPath = path.resolve(projectPath);
+  const matches = recordEntries
+    .filter((entryRoot) => isPathInside(normalizedProjectPath, entryRoot))
+    .sort((a, b) => b.length - a.length);
+
+  return matches[0] || '';
+}
+```
+
+Execution order MUST be:
+1. Determine the project path from explicit user project path first; otherwise use the current workspace path.
+2. Resolve the git root from that path.
+3. Read only `<gitRoot>/.code-inspector/record.json`.
+4. Run `resolvePreferredProjectEntry(Object.keys(recordJson), projectPath)` to get the single matched project directory.
+5. Probe only the matched project directory port first, then other ports from the same `record.json`, then fallback `5678`.
 
 ## Request Context Endpoint
 - Prefer `GET /context/selected` for read-only context retrieval.

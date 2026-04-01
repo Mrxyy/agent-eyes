@@ -15,6 +15,7 @@ export default defineConfig({
         'fs',
         'path',
         'process',
+        'child_process',
         /^@modelcontextprotocol\/sdk/,
         'zod',
         'zod/v4',

@@ -7,17 +7,17 @@ module.exports = {
     config.plugin('code-inspector-plugin').use(
       CodeInspectorPlugin({
         bundler: 'webpack',
-        // agent: {
-        //   acp: {
-        //     // command: 'claude-agent-acp',
-        //     command: 'codex-acp',
-        //     args: [],
-        //     // command: 'gemini',
-        //     // args: ['--experimental-acp'],
-        //     persistSession: true,
-        //     authMethodId: process.env.CODE_INSPECTOR_ACP_AUTH_METHOD_ID,
-        //   },
-        // },
+        agent: {
+          acp: {
+            // command: 'claude-agent-acp',
+            command: 'codex-acp',
+            args: [],
+            // command: 'gemini',
+            // args: ['--experimental-acp'],
+            persistSession: true,
+            authMethodId: process.env.CODE_INSPECTOR_ACP_AUTH_METHOD_ID,
+          },
+        },
       })
     );
 
